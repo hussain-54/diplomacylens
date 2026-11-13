@@ -1,0 +1,53 @@
+# Global Diplomacy Lens — Apache config for Namecheap / cPanel shared hosting
+# Vite copies this file from public/ into dist/ on `npm run build`.
+# Deployed to /home/diplaboi/public_html/ via .cpanel.yml
+
+Options -MultiViews
+RewriteEngine On
+
+# -----------------------------------------------------------------------------
+# HTTPS redirect (loop-safe)
+# Skip when already HTTPS, or when a reverse proxy marks the request as HTTPS
+# via X-Forwarded-Proto (common on shared hosts / CDNs).
+# -----------------------------------------------------------------------------
+RewriteCond %{HTTPS} !=on
+RewriteCond %{HTTP:X-Forwarded-Proto} !https [NC]
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+
+# -----------------------------------------------------------------------------
+# SPA fallback (TanStack Router client-side routes)
+# Serve real files and directories as-is; everything else → index.html
+# -----------------------------------------------------------------------------
+RewriteCond %{REQUEST_FILENAME} -f [OR]
+RewriteCond %{REQUEST_FILENAME} -d
+RewriteRule ^ - [L]
+
+RewriteRule ^ index.html [L]
+
+# -----------------------------------------------------------------------------
+# Caching
+# Vite emits content-hashed JS/CSS; HTML must not be cached aggressively.
+# -----------------------------------------------------------------------------
+<IfModule mod_headers.c>
+  <FilesMatch "^(index\.html)$">
+    Header set Cache-Control "no-cache, no-store, must-revalidate"
+    Header set Pragma "no-cache"
+  </FilesMatch>
+
+  <FilesMatch "\.(?:js|css)$">
+    Header set Cache-Control "public, max-age=31536000, immutable"
+  </FilesMatch>
+
+  <FilesMatch "\.(?:ico|png|jpe?g|gif|webp|svg|woff2?)$">
+    Header set Cache-Control "public, max-age=604800"
+  </FilesMatch>
+
+  Header set X-Content-Type-Options "nosniff"
+  Header set Referrer-Policy "strict-origin-when-cross-origin"
+  Header set X-Frame-Options "SAMEORIGIN"
+</IfModule>
+
+<IfModule mod_deflate.c>
+  AddOutputFilterByType DEFLATE text/html text/plain text/xml text/css
+  AddOutputFilterByType DEFLATE application/javascript application/json image/svg+xml
+</IfModule>

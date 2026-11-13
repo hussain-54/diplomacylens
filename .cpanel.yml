@@ -1,0 +1,22 @@
+---
+# Global Diplomacy Lens — cPanel Git Deployment
+# Repo clone: /home/diplaboi/repositories/diplomacylens
+# Web root:   /home/diplaboi/public_html/
+#
+# Builds in /home/diplaboi/tmp/diplomacylens-build (outside the Git clone)
+# so the repository working tree stays clean for the next Pull/Deploy.
+#
+# Required once on the server (not in Git):
+#   /home/diplaboi/.env.diplomacylens  with VITE_SUPABASE_URL,
+#   VITE_SUPABASE_PUBLISHABLE_KEY, VITE_SITE_URL, and a working PATH to npm/node.
+deployment:
+  tasks:
+    - export DEPLOYPATH=/home/diplaboi/public_html
+    - export REPO=/home/diplaboi/repositories/diplomacylens
+    - export BUILDDIR=/home/diplaboi/tmp/diplomacylens-build
+    - export ENVFILE=/home/diplaboi/.env.diplomacylens
+    - /bin/mkdir -p /home/diplaboi/tmp
+    - /bin/rm -rf /home/diplaboi/tmp/diplomacylens-build
+    - /bin/cp -a /home/diplaboi/repositories/diplomacylens /home/diplaboi/tmp/diplomacylens-build
+    - /bin/chmod +x /home/diplaboi/tmp/diplomacylens-build/scripts/cpanel-deploy.sh
+    - /bin/bash /home/diplaboi/tmp/diplomacylens-build/scripts/cpanel-deploy.sh

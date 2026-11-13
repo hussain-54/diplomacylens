@@ -105,19 +105,31 @@ const writeStaffActivity = async (entry: {
   }
 };
 
+const STAFF_API_UNAVAILABLE =
+  "Staff invite, suspend, password reset, and MFA lookup require the /api/staff serverless endpoint (Vercel). This action is unavailable on static cPanel hosting alone. Other staff profile and role tools still work via Supabase.";
+
 const staffApi = async (payload: Record<string, unknown>) => {
   const {
     data: { session },
   } = await supabase.auth.getSession();
   if (!session?.access_token) throw new Error("Sign in required.");
-  const response = await fetch("/api/staff", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${session.access_token}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
+  let response: Response;
+  try {
+    response = await fetch("/api/staff", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${session.access_token}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+  } catch {
+    throw new Error(STAFF_API_UNAVAILABLE);
+  }
+  const contentType = response.headers.get("content-type") || "";
+  if (response.status === 404 || !contentType.includes("application/json")) {
+    throw new Error(STAFF_API_UNAVAILABLE);
+  }
   const body = (await response.json().catch(() => ({}))) as {
     error?: string;
     ok?: boolean;
