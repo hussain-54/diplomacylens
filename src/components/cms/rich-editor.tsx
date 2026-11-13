@@ -1,0 +1,38 @@
+import type { ReactNode } from "react";
+import { BlockEditor } from "@/components/block-editor";
+import type { Block } from "@/lib/blocks";
+
+export type RichEditorProps = {
+  value: Block[];
+  onChange: (blocks: Block[]) => void;
+  readOnly?: boolean;
+  onUploadImage?: (file: File) => Promise<string>;
+  onOpenAi?: () => void;
+  className?: string;
+  emptyHint?: ReactNode;
+};
+
+/** Newsroom block editor: Medium-like canvas with slash commands, formatting toolbar, media library, lists, pullquotes, HTML, newsletter CTA, and ads. */
+export function RichEditor({
+  value,
+  onChange,
+  readOnly,
+  onUploadImage,
+  onOpenAi,
+  className,
+  emptyHint: _emptyHint,
+}: RichEditorProps) {
+  return (
+    <div className={className}>
+      <BlockEditor
+        value={value}
+        onChange={onChange}
+        readOnly={readOnly}
+        onUploadImage={onUploadImage}
+        onOpenAi={onOpenAi}
+      />
+    </div>
+  );
+}
+
+export type { Block };

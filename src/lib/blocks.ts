@@ -1,0 +1,592 @@
+// Block document model stored as versioned JSON in articles.body.
+// Legacy articles (plain text) are converted to paragraph blocks on load.
+
+export type BlockType =
+  | "paragraph"
+  | "heading"
+  | "image"
+  | "video"
+  | "audio"
+  | "file"
+  | "quote"
+  | "pullquote"
+  | "callout"
+  | "list"
+  | "divider"
+  | "embed"
+  | "gallery"
+  | "table"
+  | "code"
+  | "live"
+  | "html"
+  | "newsletter"
+  | "ad";
+
+export type GalleryImage = {
+  url: string;
+  alt: string;
+  caption?: string;
+  /** Display width within its cell, 25–100. */
+  widthPercent?: number;
+  fit?: ImageFit;
+};
+export type ListStyle = "bullet" | "numbered" | "check";
+export type ListItem = { text: string; checked?: boolean };
+export type ImageAlign = "left" | "center" | "right" | "full";
+export type ImageSize = "small" | "medium" | "large" | "full";
+/** How the photo fills its frame — never stretch/distort the source. */
+export type ImageFit = "original" | "contain" | "cover";
+/** How a gallery lays out photos in the article column. */
+export type GalleryLayout = "pair" | "single" | "full";
+export type HeadingLevel = 1 | 2 | 3 | 4 | 5 | 6;
+export type TextAlign = "left" | "center" | "right" | "justify";
+export type CalloutTone = "info" | "tip" | "warning" | "urgent";
+
+export type BlockData = {
+  paragraph: { text: string; align?: TextAlign };
+  heading: { text: string; level: HeadingLevel; align?: TextAlign };
+  image: {
+    url: string;
+    alt: string;
+    caption: string;
+    credit: string;
+    align: ImageAlign;
+    size: ImageSize;
+    /** Width of the figure relative to the article column (25–100). */
+    widthPercent?: number;
+    /** Max height in px for tall photos; omit for natural height. */
+    maxHeight?: number;
+    /** Optional height scale relative to natural height (50–150). */
+    heightPercent?: number;
+    fit?: ImageFit;
+  };
+  video: { url: string; caption: string };
+  audio: { url: string; title: string; caption: string };
+  file: { url: string; title: string; fileName: string; fileType: string };
+  quote: { text: string; attribution: string };
+  pullquote: { text: string; attribution: string };
+  callout: { text: string; tone: CalloutTone; title: string };
+  list: { style: ListStyle; items: ListItem[] };
+  divider: Record<string, never>;
+  embed: { url: string; caption: string };
+  gallery: { images: GalleryImage[]; layout?: GalleryLayout };
+  table: { headers: string[]; rows: string[][] };
+  code: { language: string; code: string };
+  live: { time: string; title: string; text: string };
+  html: { code: string };
+  newsletter: {
+    heading: string;
+    body: string;
+    buttonLabel: string;
+    buttonUrl: string;
+  };
+  ad: {
+    label: string;
+    imageUrl: string;
+    linkUrl: string;
+    html: string;
+  };
+};
+
+export type Block = {
+  [T in BlockType]: { id: string; type: T; data: BlockData[T] };
+}[BlockType];
+
+export type ArticleBodyExtras = {
+  highlights?: string[];
+  faq_enabled?: boolean;
+  faq_items?: Array<{ question: string; answer: string }>;
+  references?: string[];
+  related_notes?: string;
+  excerpt?: string;
+};
+
+export type BlockDocument = { v: 1; blocks: Block[]; extras?: ArticleBodyExtras };
+
+export const BLOCK_LABELS: Record<BlockType, string> = {
+  paragraph: "Paragraph",
+  heading: "Heading",
+  image: "Image",
+  video: "Video",
+  audio: "Audio",
+  file: "File",
+  quote: "Quote",
+  pullquote: "Pull Quote",
+  callout: "Callout",
+  list: "List",
+  divider: "Divider",
+  embed: "Embed",
+  gallery: "Gallery",
+  table: "Table",
+  code: "Code Block",
+  live: "Live Blog Entry",
+  html: "Custom HTML",
+  newsletter: "Newsletter CTA",
+  ad: "Advertisement",
+};
+
+/** Types that can be converted between while preserving text where possible. */
+export const CONVERTIBLE_TYPES: BlockType[] = [
+  "paragraph",
+  "heading",
+  "quote",
+  "pullquote",
+  "callout",
+  "list",
+  "code",
+  "html",
+];
+
+export function blockId(): string {
+  return typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `b-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function createBlock(type: BlockType): Block {
+  const id = blockId();
+  switch (type) {
+    case "paragraph":
+      return { id, type, data: { text: "" } };
+    case "heading":
+      return { id, type, data: { text: "", level: 2 } };
+    case "image":
+      return {
+        id,
+        type,
+        data: {
+          url: "",
+          alt: "",
+          caption: "",
+          credit: "",
+          align: "full",
+          size: "full",
+          widthPercent: 100,
+          heightPercent: 100,
+          fit: "original",
+        },
+      };
+    case "video":
+      return { id, type, data: { url: "", caption: "" } };
+    case "audio":
+      return { id, type, data: { url: "", title: "", caption: "" } };
+    case "file":
+      return { id, type, data: { url: "", title: "", fileName: "", fileType: "" } };
+    case "quote":
+      return { id, type, data: { text: "", attribution: "" } };
+    case "pullquote":
+      return { id, type, data: { text: "", attribution: "" } };
+    case "callout":
+      return { id, type, data: { text: "", tone: "info", title: "" } };
+    case "list":
+      return {
+        id,
+        type,
+        data: {
+          style: "bullet",
+          items: [{ text: "" }, { text: "" }],
+        },
+      };
+    case "divider":
+      return { id, type, data: {} };
+    case "embed":
+      return { id, type, data: { url: "", caption: "" } };
+    case "gallery":
+      return { id, type, data: { images: [], layout: "pair" } };
+    case "table":
+      return {
+        id,
+        type,
+        data: {
+          headers: ["Column 1", "Column 2", "Column 3"],
+          rows: [
+            ["", "", ""],
+            ["", "", ""],
+          ],
+        },
+      };
+    case "code":
+      return { id, type, data: { language: "text", code: "" } };
+    case "live":
+      return {
+        id,
+        type,
+        data: { time: new Date().toISOString(), title: "", text: "" },
+      };
+    case "html":
+      return { id, type, data: { code: "" } };
+    case "newsletter":
+      return {
+        id,
+        type,
+        data: {
+          heading: "Stay informed",
+          body: "Get diplomacy briefings in your inbox.",
+          buttonLabel: "Subscribe",
+          buttonUrl: "/newsletter",
+        },
+      };
+    case "ad":
+      return {
+        id,
+        type,
+        data: { label: "Advertisement", imageUrl: "", linkUrl: "", html: "" },
+      };
+  }
+}
+
+function extractText(block: Block): string {
+  switch (block.type) {
+    case "paragraph":
+    case "heading":
+    case "quote":
+    case "pullquote":
+    case "callout":
+      return block.data.text;
+    case "list":
+      return block.data.items.map((item) => item.text).join("\n");
+    case "code":
+      return block.data.code;
+    case "html":
+      return block.data.code;
+    case "live":
+      return `${block.data.title}\n${block.data.text}`.trim();
+    default:
+      return "";
+  }
+}
+
+/** Convert a block to another type, preserving text when possible. */
+export function convertBlockType(block: Block, to: BlockType): Block {
+  if (block.type === to) return block;
+  const text = extractText(block);
+  const id = block.id;
+  switch (to) {
+    case "paragraph":
+      return { id, type: "paragraph", data: { text } };
+    case "heading":
+      return { id, type: "heading", data: { text, level: 2 } };
+    case "quote":
+      return {
+        id,
+        type: "quote",
+        data: {
+          text,
+          attribution:
+            block.type === "quote" || block.type === "pullquote" ? block.data.attribution : "",
+        },
+      };
+    case "pullquote":
+      return {
+        id,
+        type: "pullquote",
+        data: {
+          text,
+          attribution:
+            block.type === "quote" || block.type === "pullquote" ? block.data.attribution : "",
+        },
+      };
+    case "callout":
+      return {
+        id,
+        type: "callout",
+        data: {
+          text,
+          title: block.type === "callout" ? block.data.title : "",
+          tone: block.type === "callout" ? block.data.tone : "info",
+        },
+      };
+    case "list": {
+      const lines = text
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => ({ text: line }));
+      return {
+        id,
+        type: "list",
+        data: {
+          style: "bullet",
+          items: lines.length ? lines : [{ text: "" }],
+        },
+      };
+    }
+    case "code":
+      return { id, type: "code", data: { language: "text", code: text } };
+    case "html":
+      return { id, type: "html", data: { code: text } };
+    default: {
+      const next = createBlock(to);
+      return { ...next, id } as Block;
+    }
+  }
+}
+
+function normalizeBlock(raw: unknown): Block | null {
+  if (!raw || typeof raw !== "object") return null;
+  const b = raw as { id?: string; type?: string; data?: Record<string, unknown> };
+  if (!b.type || !(b.type in BLOCK_LABELS)) return null;
+  const type = b.type as BlockType;
+  const base = createBlock(type);
+  const id = typeof b.id === "string" && b.id ? b.id : base.id;
+  const data = { ...base.data, ...(b.data ?? {}) } as BlockData[typeof type];
+
+  if (type === "heading") {
+    const heading = data as BlockData["heading"];
+    const level = Number(heading.level);
+    heading.level = ([1, 2, 3, 4, 5, 6].includes(level) ? level : 2) as HeadingLevel;
+    if (heading.align && !["left", "center", "right", "justify"].includes(heading.align)) {
+      delete heading.align;
+    }
+  }
+  if (type === "callout") {
+    const callout = data as BlockData["callout"];
+    callout.tone = (
+      ["info", "tip", "warning", "urgent"].includes(callout.tone) ? callout.tone : "info"
+    ) as CalloutTone;
+    callout.title = typeof callout.title === "string" ? callout.title : "";
+    callout.text = typeof callout.text === "string" ? callout.text : "";
+  }
+  if (type === "paragraph") {
+    const para = data as BlockData["paragraph"];
+    if (para.align && !["left", "center", "right", "justify"].includes(para.align)) {
+      delete para.align;
+    }
+  }
+  if (type === "image") {
+    const img = data as BlockData["image"];
+    img.credit = typeof img.credit === "string" ? img.credit : "";
+    img.align = (
+      ["left", "center", "right", "full"].includes(img.align) ? img.align : "full"
+    ) as ImageAlign;
+    img.size = (
+      ["small", "medium", "large", "full"].includes(img.size) ? img.size : "large"
+    ) as ImageSize;
+    const width = Number(img.widthPercent);
+    img.widthPercent =
+      Number.isFinite(width) && width >= 25 && width <= 100 ? Math.round(width) : 100;
+    const maxH = Number(img.maxHeight);
+    img.maxHeight =
+      Number.isFinite(maxH) && maxH >= 120 && maxH <= 1200 ? Math.round(maxH) : undefined;
+    img.fit = (
+      ["original", "contain", "cover"].includes(img.fit as string) ? img.fit : "original"
+    ) as ImageFit;
+    const heightPct = Number(img.heightPercent);
+    img.heightPercent =
+      Number.isFinite(heightPct) && heightPct >= 50 && heightPct <= 150
+        ? Math.round(heightPct)
+        : 100;
+  }
+  if (type === "gallery") {
+    const gallery = data as BlockData["gallery"];
+    if (!Array.isArray(gallery.images)) gallery.images = [];
+    gallery.layout = (
+      ["pair", "single", "full"].includes(gallery.layout as string) ? gallery.layout : "pair"
+    ) as GalleryLayout;
+    gallery.images = gallery.images
+      .filter((img) => img && typeof img.url === "string" && img.url)
+      .map((img) => {
+        const width = Number(img.widthPercent);
+        return {
+          url: img.url,
+          alt: typeof img.alt === "string" ? img.alt : "",
+          caption: typeof img.caption === "string" ? img.caption : undefined,
+          widthPercent:
+            Number.isFinite(width) && width >= 25 && width <= 100 ? Math.round(width) : 100,
+          fit: (["original", "contain", "cover"].includes(img.fit as string)
+            ? img.fit
+            : "original") as ImageFit,
+        };
+      });
+  }
+  if (type === "list") {
+    const list = data as BlockData["list"];
+    if (!Array.isArray(list.items) || !list.items.length) {
+      list.items = [{ text: "" }];
+    }
+    list.style = (
+      ["bullet", "numbered", "check"].includes(list.style) ? list.style : "bullet"
+    ) as ListStyle;
+  }
+
+  return { id, type, data } as Block;
+}
+
+export function serializeBlocks(blocks: Block[], extras?: ArticleBodyExtras): string {
+  const cleanedExtras = extras ? cleanExtras(extras) : undefined;
+  const doc: BlockDocument = cleanedExtras
+    ? { v: 1, blocks, extras: cleanedExtras }
+    : { v: 1, blocks };
+  return JSON.stringify(doc);
+}
+
+function cleanExtras(extras: ArticleBodyExtras): ArticleBodyExtras | undefined {
+  const highlights = (extras.highlights ?? []).map((h) => h.trim()).filter(Boolean);
+  const faq_items = (extras.faq_items ?? [])
+    .map((item) => ({
+      question: item.question.trim(),
+      answer: item.answer.trim(),
+    }))
+    .filter((item) => item.question || item.answer);
+  const references = (extras.references ?? []).map((r) => r.trim()).filter(Boolean);
+  const related_notes = extras.related_notes?.trim() || undefined;
+  const excerpt = extras.excerpt?.trim() || undefined;
+  const next: ArticleBodyExtras = {};
+  if (highlights.length) next.highlights = highlights;
+  if (extras.faq_enabled) next.faq_enabled = true;
+  if (faq_items.length) next.faq_items = faq_items;
+  if (references.length) next.references = references;
+  if (related_notes) next.related_notes = related_notes;
+  if (excerpt) next.excerpt = excerpt;
+  return Object.keys(next).length ? next : undefined;
+}
+
+/** Stable anchor id for a heading, used for the table of contents. */
+export function headingAnchorId(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, "-")
+      .replace(/(^-|-$)/g, "")
+      .slice(0, 80) || "section"
+  );
+}
+
+/** Extract H2/H3 headings from a body for a table of contents. */
+export function extractHeadings(
+  blocks: Block[],
+): Array<{ id: string; text: string; level: 2 | 3 }> {
+  const items: Array<{ id: string; text: string; level: 2 | 3 }> = [];
+  for (const block of blocks) {
+    if (block.type !== "heading") continue;
+    const text = block.data.text.trim();
+    if (!text) continue;
+    if (block.data.level === 2 || block.data.level === 3) {
+      items.push({ id: headingAnchorId(text), text, level: block.data.level });
+    }
+  }
+  return items;
+}
+
+export function parseBodyExtras(body: string | null | undefined): ArticleBodyExtras {
+  if (!body?.trim().startsWith("{")) return {};
+  try {
+    const doc = JSON.parse(body.trim()) as Partial<BlockDocument>;
+    return doc.extras && typeof doc.extras === "object" ? doc.extras : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Parse an article body: block JSON when present, otherwise legacy plain text. */
+export function parseBody(body: string | null | undefined): Block[] {
+  if (!body || !body.trim()) return [createBlock("paragraph")];
+  const trimmed = body.trim();
+  if (trimmed.startsWith("{")) {
+    try {
+      const doc = JSON.parse(trimmed) as Partial<BlockDocument>;
+      if (Array.isArray(doc.blocks)) {
+        const blocks = doc.blocks
+          .map((b) => normalizeBlock(b))
+          .filter((b): b is Block => b !== null);
+        return blocks.length ? blocks : [createBlock("paragraph")];
+      }
+    } catch {
+      // fall through to legacy parsing
+    }
+  }
+  return trimmed
+    .split(/\n\s*\n/)
+    .map((text) => text.trim())
+    .filter(Boolean)
+    .map((text) => ({ id: blockId(), type: "paragraph" as const, data: { text } }));
+}
+
+export function isBlockBody(body: string | null | undefined): boolean {
+  if (!body) return false;
+  const trimmed = body.trim();
+  if (!trimmed.startsWith("{")) return false;
+  try {
+    const doc = JSON.parse(trimmed) as Partial<BlockDocument>;
+    return Array.isArray(doc.blocks);
+  } catch {
+    return false;
+  }
+}
+
+/** Strip lightweight markdown marks for plain-text consumers. */
+export function stripInlineMarks(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, "$1")
+    .replace(/__(.+?)__/g, "$1")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/~~(.+?)~~/g, "$1")
+    .replace(/==(.+?)==/g, "$1")
+    .replace(/\{#([0-9a-fA-F]{3,8})\}(.+?)\{\/\}/g, "$2")
+    .replace(/\{size:(sm|lg|xl)\}(.+?)\{\/size\}/g, "$2")
+    .replace(/\{font:(serif|sans|mono)\}(.+?)\{\/font\}/g, "$2")
+    .replace(/`(.+?)`/g, "$1")
+    .replace(/\[(.+?)\]\((.+?)\)/g, "$1");
+}
+
+/** Plain-text rendition used for excerpts and search. */
+export function blocksToPlainText(blocks: Block[]): string {
+  return blocks
+    .map((b) => {
+      switch (b.type) {
+        case "paragraph":
+        case "heading":
+        case "quote":
+        case "pullquote":
+        case "callout":
+          return stripInlineMarks(b.data.text);
+        case "list":
+          return b.data.items.map((item) => stripInlineMarks(item.text)).join("\n");
+        case "live":
+          return stripInlineMarks(`${b.data.title} ${b.data.text}`.trim());
+        case "table":
+          return [b.data.headers.join(" | "), ...b.data.rows.map((row) => row.join(" | "))].join(
+            "\n",
+          );
+        case "code":
+        case "html":
+          return b.type === "code" ? b.data.code : "";
+        default:
+          return "";
+      }
+    })
+    .filter(Boolean)
+    .join("\n\n");
+}
+
+/** Best-effort iframe src for common providers; null means render a link instead. */
+export function embedSrc(url: string): string | null {
+  try {
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, "");
+    if (host === "youtube.com" || host === "m.youtube.com") {
+      const id = u.searchParams.get("v");
+      if (id) return `https://www.youtube-nocookie.com/embed/${id}`;
+      const shorts = u.pathname.match(/^\/(?:shorts|embed)\/([\w-]{6,})/);
+      if (shorts) return `https://www.youtube-nocookie.com/embed/${shorts[1]}`;
+    }
+    if (host === "youtu.be") {
+      const id = u.pathname.slice(1).split("/")[0];
+      if (id) return `https://www.youtube-nocookie.com/embed/${id}`;
+    }
+    if (host === "vimeo.com") {
+      const id = u.pathname.match(/\/(\d+)/)?.[1];
+      if (id) return `https://player.vimeo.com/video/${id}`;
+    }
+    if (host === "player.vimeo.com" || host === "youtube-nocookie.com") {
+      return url;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function isDirectVideoFile(url: string): boolean {
+  return /\.(mp4|webm|ogg|mov)(\?|#|$)/i.test(url);
+}

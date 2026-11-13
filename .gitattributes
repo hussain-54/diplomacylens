@@ -1,0 +1,17 @@
+# Normalize text files; let checkout use native EOL on Windows (core.autocrlf).
+* text=auto
+
+# Keep binary assets untouched
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.mp4 binary
+*.mp3 binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.eot binary

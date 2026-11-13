@@ -1,0 +1,13 @@
+export { VideosLayout } from "./videos-shell";
+export { VideosSidebarMenu } from "./videos-sidebar-menu";
+export { VideosDashboardPage } from "./videos-dashboard-page";
+export { VideosLibraryPage } from "./videos-library-page";
+export { VideosCreatePage, VideosEditPage } from "./videos-video-form";
+export { VideosUploadPage } from "./videos-upload-page";
+export { VideosPlaylistsPage } from "./videos-playlists-page";
+export { VideosArchivePage } from "./videos-archive-page";
+export { VideosAnalyticsPage } from "./videos-analytics-page";
+export { VideosSettingsPage } from "./videos-settings-page";
+export { VideoPlayer } from "./video-player";
+export type { VideoPlayerProps } from "./video-player";
+export * from "./nav";

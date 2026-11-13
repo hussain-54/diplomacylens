@@ -1,0 +1,30 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "installCommand": "npm install",
+  "framework": "vite",
+  "rewrites": [
+    { "source": "/robots.txt", "destination": "/api/robots" },
+    { "source": "/sitemap.xml", "destination": "/api/sitemap?type=index" },
+    { "source": "/pages-sitemap.xml", "destination": "/api/sitemap?type=pages" },
+    { "source": "/news-sitemap.xml", "destination": "/api/sitemap?type=news" },
+    { "source": "/images-sitemap.xml", "destination": "/api/sitemap?type=images" },
+    { "source": "/videos-sitemap.xml", "destination": "/api/sitemap?type=videos" },
+    { "source": "/rss.xml", "destination": "/api/rss" },
+    { "source": "/feed.xml", "destination": "/api/rss" },
+    { "source": "/podcasts-rss.xml", "destination": "/api/podcasts-rss" },
+    { "source": "/podcast-feed.xml", "destination": "/api/podcasts-rss" },
+    {
+      "source": "/article/:slug",
+      "has": [
+        {
+          "type": "header",
+          "key": "user-agent",
+          "value": "(?i).*(facebookexternalhit|facebot|twitterbot|linkedinbot|slackbot|slack-imgproxy|discordbot|telegrambot|whatsapp|skypeuripreview|pinterest|redditbot|embedly|quora link preview|applebot|vkshare|iframely|mastodon|bufferbot|flipboard|tumblr|bitlybot|nuzzel|w3c_validator|google-inspectiontool|googlebot|bingbot|yandex|baiduspider|duckduckbot|semrushbot|ahrefsbot|mj12bot|dotbot|petalbot|bytespider|meta-externalagent|meta-externalfetcher|preview|embed|bot|crawl|spider|slurp).*"
+        }
+      ],
+      "destination": "/api/social-preview?slug=:slug"
+    },
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

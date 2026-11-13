@@ -1,0 +1,9 @@
+export { MediaLibraryPage } from "./media-library-page";
+export { MediaUploadPage } from "./media-upload-page";
+export { MediaGalleriesPage } from "./media-galleries-page";
+export { MediaSettingsPage } from "./media-settings-page";
+export { MediaDashboardPage } from "./media-dashboard-page";
+export { MediaFoldersPage } from "./media-folders-page";
+export { MediaDuplicatesPage } from "./media-duplicates-page";
+export { MediaActivityPage } from "./media-activity-page";
+export { MediaImageEditor } from "./media-image-editor";

@@ -1,0 +1,3051 @@
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  AlignCenter,
+  AlignJustify,
+  AlignLeft,
+  AlignRight,
+  Bold,
+  Braces,
+  CheckSquare,
+  ChevronDown,
+  Code2,
+  Copy,
+  File,
+  FileCode2,
+  FolderOpen,
+  GripVertical,
+  Headphones,
+  Heading2,
+  Highlighter,
+  Image as ImageIcon,
+  Images,
+  Info,
+  Italic,
+  Link2,
+  List,
+  ListOrdered,
+  Mail,
+  Maximize2,
+  Megaphone,
+  Minus,
+  Palette,
+  Plus,
+  Quote,
+  Radio,
+  Redo2,
+  Sparkles,
+  Strikethrough,
+  Table2,
+  Trash2,
+  Type,
+  Underline,
+  Undo2,
+  Video,
+  ArrowUp,
+  ArrowDown,
+} from "lucide-react";
+import {
+  BLOCK_LABELS,
+  CONVERTIBLE_TYPES,
+  convertBlockType,
+  createBlock,
+  embedSrc,
+  isDirectVideoFile,
+  type Block,
+  type BlockType,
+  type CalloutTone,
+  type HeadingLevel,
+  type GalleryLayout,
+  type ImageAlign,
+  type ImageFit,
+  type ImageSize,
+  type ListStyle,
+  type TextAlign,
+} from "@/lib/blocks";
+import { imageFitClass } from "@/lib/article-image-display";
+import {
+  EDITOR_TEXT_COLORS,
+  EditorBubbleToolbar,
+  selectionBubblePos,
+  type BubblePos,
+} from "@/components/editor-bubble-toolbar";
+import { DamAssetPicker } from "@/components/articles/dam-asset-picker";
+import {
+  clipboardToEditorText,
+  looksLikeRichHtml,
+  pasteLooksLikeList,
+  pasteToListItems,
+  splitPasteParagraphs,
+} from "@/lib/paste-cleanup";
+import {
+  expandText,
+  fixGrammar,
+  improveWriting,
+  shortenText,
+  transformSelection,
+} from "@/lib/desk-ai";
+import { wrapSelection } from "@/lib/writing-stats";
+import { cn } from "@/lib/utils";
+
+function insertAtCaret(
+  value: string,
+  start: number,
+  end: number,
+  insert: string,
+): { text: string; selectionStart: number; selectionEnd: number } {
+  const text = value.slice(0, start) + insert + value.slice(end);
+  const caret = start + insert.length;
+  return { text, selectionStart: caret, selectionEnd: caret };
+}
+
+const BLOCK_ICONS: Record<BlockType, typeof AlignLeft> = {
+  paragraph: AlignLeft,
+  heading: Heading2,
+  image: ImageIcon,
+  video: Video,
+  audio: Headphones,
+  file: File,
+  quote: Quote,
+  pullquote: Quote,
+  callout: Info,
+  list: List,
+  divider: Minus,
+  embed: Code2,
+  gallery: Images,
+  table: Table2,
+  code: Braces,
+  live: Radio,
+  html: FileCode2,
+  newsletter: Mail,
+  ad: Megaphone,
+};
+
+const BLOCK_MENU: BlockType[] = [
+  "paragraph",
+  "heading",
+  "image",
+  "video",
+  "audio",
+  "file",
+  "gallery",
+  "quote",
+  "pullquote",
+  "callout",
+  "list",
+  "divider",
+  "embed",
+  "table",
+  "code",
+  "live",
+  "html",
+  "newsletter",
+  "ad",
+];
+
+const IMAGE_SIZE_PREVIEW: Record<ImageSize, string> = {
+  small: "max-w-xs",
+  medium: "max-w-sm",
+  large: "max-w-md",
+  full: "w-full max-w-full",
+};
+
+type Props = {
+  value: Block[];
+  onChange: (blocks: Block[]) => void;
+  readOnly?: boolean;
+  onUploadImage?: (file: File) => Promise<string>;
+  onOpenAi?: () => void;
+};
+
+type ActiveField = {
+  blockId: string;
+  el: HTMLTextAreaElement | HTMLInputElement;
+};
+
+export function BlockEditor({ value, onChange, readOnly, onUploadImage, onOpenAi }: Props) {
+  const past = useRef<Block[][]>([]);
+  const future = useRef<Block[][]>([]);
+  const lastPush = useRef<{ at: number; blockId: string | null }>({ at: 0, blockId: null });
+  const [, forceRender] = useState(0);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const [menuAt, setMenuAt] = useState<number | null>(null);
+  const [slashAt, setSlashAt] = useState<{ blockId: string; query: string } | null>(null);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [activeField, setActiveField] = useState<ActiveField | null>(null);
+  const [focusedBlockId, setFocusedBlockId] = useState<string | null>(null);
+  const [convertOpenId, setConvertOpenId] = useState<string | null>(null);
+  const [bubblePos, setBubblePos] = useState<BubblePos | null>(null);
+  const [colorMenuOpen, setColorMenuOpen] = useState(false);
+  const [sizeMenuOpen, setSizeMenuOpen] = useState(false);
+  const [fontMenuOpen, setFontMenuOpen] = useState(false);
+  const [aiMenuOpen, setAiMenuOpen] = useState(false);
+  const bubbleBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const focusedBlock = value.find((b) => b.id === focusedBlockId) ?? null;
+
+  const updateBubble = useCallback(() => {
+    if (readOnly || !activeField) {
+      setBubblePos(null);
+      return;
+    }
+    setBubblePos(selectionBubblePos(activeField.el));
+  }, [readOnly, activeField]);
+
+  const focusField = useCallback((blockId: string, el: HTMLTextAreaElement | HTMLInputElement) => {
+    if (bubbleBlurTimer.current) {
+      clearTimeout(bubbleBlurTimer.current);
+      bubbleBlurTimer.current = null;
+    }
+    setActiveField({ blockId, el });
+  }, []);
+
+  const blurField = useCallback(() => {
+    if (bubbleBlurTimer.current) clearTimeout(bubbleBlurTimer.current);
+    bubbleBlurTimer.current = setTimeout(() => {
+      setBubblePos(null);
+      bubbleBlurTimer.current = null;
+    }, 150);
+  }, []);
+
+  useEffect(() => {
+    if (!activeField) {
+      setBubblePos(null);
+      return;
+    }
+    const el = activeField.el;
+    const onSel = () => {
+      if (readOnly) {
+        setBubblePos(null);
+        return;
+      }
+      setBubblePos(selectionBubblePos(el));
+    };
+    el.addEventListener("select", onSel);
+    el.addEventListener("mouseup", onSel);
+    el.addEventListener("keyup", onSel);
+    onSel();
+    return () => {
+      el.removeEventListener("select", onSel);
+      el.removeEventListener("mouseup", onSel);
+      el.removeEventListener("keyup", onSel);
+    };
+  }, [activeField, readOnly]);
+
+  const apply = useCallback(
+    (next: Block[], editedBlockId: string | null = null) => {
+      const now = Date.now();
+      const coalesce =
+        editedBlockId !== null &&
+        editedBlockId === lastPush.current.blockId &&
+        now - lastPush.current.at < 900;
+      if (!coalesce) {
+        past.current = [...past.current.slice(-99), value];
+        future.current = [];
+      }
+      lastPush.current = { at: now, blockId: editedBlockId };
+      onChange(next);
+      forceRender((n) => n + 1);
+    },
+    [value, onChange],
+  );
+
+  const undo = useCallback(() => {
+    const prev = past.current.pop();
+    if (!prev) return;
+    future.current.push(value);
+    lastPush.current = { at: 0, blockId: null };
+    onChange(prev);
+    forceRender((n) => n + 1);
+  }, [value, onChange]);
+
+  const redo = useCallback(() => {
+    const next = future.current.pop();
+    if (!next) return;
+    past.current.push(value);
+    lastPush.current = { at: 0, blockId: null };
+    onChange(next);
+    forceRender((n) => n + 1);
+  }, [value, onChange]);
+
+  const updateBlock = (id: string, data: Block["data"]) => {
+    apply(
+      value.map((b) => (b.id === id ? ({ ...b, data } as Block) : b)),
+      id,
+    );
+  };
+
+  const insertAt = (index: number, type: BlockType) => {
+    const next = [...value];
+    next.splice(index, 0, createBlock(type));
+    apply(next);
+    setMenuAt(null);
+    setSlashAt(null);
+  };
+
+  const removeBlock = (id: string) => {
+    const next = value.filter((b) => b.id !== id);
+    apply(next.length ? next : [createBlock("paragraph")]);
+    if (slashAt?.blockId === id) setSlashAt(null);
+  };
+
+  const duplicateBlock = (index: number) => {
+    const src = value[index];
+    const copy = { ...createBlock(src.type), data: JSON.parse(JSON.stringify(src.data)) } as Block;
+    const next = [...value];
+    next.splice(index + 1, 0, copy);
+    apply(next);
+  };
+
+  const moveBlock = (from: number, to: number) => {
+    if (to < 0 || to >= value.length || from === to) return;
+    const next = [...value];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    apply(next);
+  };
+
+  const convertBlock = (id: string, to: BlockType) => {
+    apply(
+      value.map((b) => (b.id === id ? convertBlockType(b, to) : b)),
+      id,
+    );
+    setConvertOpenId(null);
+  };
+
+  const applyMark = (before: string, after?: string) => {
+    if (readOnly || !activeField) return;
+    const { el, blockId } = activeField;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    const result = wrapSelection(el.value, start, end, before, after ?? before);
+    const block = value.find((b) => b.id === blockId);
+    if (!block) return;
+
+    let nextData: Block["data"] | null = null;
+    if (
+      block.type === "paragraph" ||
+      block.type === "heading" ||
+      block.type === "quote" ||
+      block.type === "pullquote" ||
+      block.type === "callout"
+    ) {
+      nextData = { ...block.data, text: result.text };
+    } else if (block.type === "code" || block.type === "html") {
+      nextData = { ...block.data, code: result.text };
+    } else if (block.type === "live") {
+      nextData = { ...block.data, text: result.text };
+    }
+    if (!nextData) return;
+
+    updateBlock(blockId, nextData);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(result.selectionStart, result.selectionEnd);
+    });
+  };
+
+  const applyTextTransform = (transform: (selected: string) => string) => {
+    if (readOnly || !activeField) return;
+    const { el, blockId } = activeField;
+    const start = el.selectionStart ?? 0;
+    const end = el.selectionEnd ?? 0;
+    const result = transformSelection(el.value, start, end, transform);
+    const block = value.find((b) => b.id === blockId);
+    if (!block) return;
+
+    let nextData: Block["data"] | null = null;
+    if (
+      block.type === "paragraph" ||
+      block.type === "heading" ||
+      block.type === "quote" ||
+      block.type === "pullquote" ||
+      block.type === "callout"
+    ) {
+      nextData = { ...block.data, text: result.text };
+    } else if (block.type === "code" || block.type === "html") {
+      nextData = { ...block.data, code: result.text };
+    } else if (block.type === "live") {
+      nextData = { ...block.data, text: result.text };
+    }
+    if (!nextData) return;
+
+    updateBlock(blockId, nextData);
+    setAiMenuOpen(false);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(result.selectionStart, result.selectionEnd);
+    });
+  };
+
+  const insertLink = () => {
+    if (readOnly || !activeField) return;
+    const url = window.prompt("Link URL", "https://");
+    if (!url) return;
+    applyMark("[", `](${url})`);
+  };
+
+  const setHeadingLevel = (level: HeadingLevel) => {
+    if (!focusedBlock) return;
+    if (focusedBlock.type === "heading") {
+      updateBlock(focusedBlock.id, { ...focusedBlock.data, level });
+      return;
+    }
+    if (
+      focusedBlock.type === "paragraph" ||
+      focusedBlock.type === "quote" ||
+      focusedBlock.type === "pullquote" ||
+      focusedBlock.type === "callout"
+    ) {
+      const converted = convertBlockType(focusedBlock, "heading");
+      if (converted.type === "heading") {
+        converted.data.level = level;
+      }
+      apply(
+        value.map((b) => (b.id === focusedBlock.id ? converted : b)),
+        focusedBlock.id,
+      );
+    }
+  };
+
+  const setTextAlign = (align: TextAlign) => {
+    if (!focusedBlock) return;
+    if (focusedBlock.type === "paragraph" || focusedBlock.type === "heading") {
+      updateBlock(focusedBlock.id, { ...focusedBlock.data, align });
+    }
+  };
+
+  const setImageAlign = (align: ImageAlign) => {
+    if (!focusedBlock || focusedBlock.type !== "image") return;
+    updateBlock(focusedBlock.id, { ...focusedBlock.data, align });
+  };
+
+  const setImageSize = (size: ImageSize) => {
+    if (!focusedBlock || focusedBlock.type !== "image") return;
+    updateBlock(focusedBlock.id, { ...focusedBlock.data, size });
+  };
+
+  const filteredSlash = (() => {
+    if (!slashAt) return [];
+    const q = slashAt.query.toLowerCase();
+    return BLOCK_MENU.filter(
+      (t) => !q || t.includes(q) || BLOCK_LABELS[t].toLowerCase().includes(q),
+    );
+  })();
+
+  useEffect(() => {
+    setSlashIndex(0);
+  }, [slashAt?.query, slashAt?.blockId]);
+
+  const pickSlash = (type: BlockType) => {
+    if (!slashAt) return;
+    const idx = value.findIndex((b) => b.id === slashAt.blockId);
+    if (idx === -1) return;
+    const next = [...value];
+    next[idx] = createBlock(type);
+    apply(next);
+    setSlashAt(null);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent) => {
+    if (readOnly) return;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && !e.shiftKey && e.key.toLowerCase() === "z") {
+      e.preventDefault();
+      undo();
+    } else if (
+      (mod && e.shiftKey && e.key.toLowerCase() === "z") ||
+      (mod && e.key.toLowerCase() === "y")
+    ) {
+      e.preventDefault();
+      redo();
+    } else if (mod && e.key.toLowerCase() === "b") {
+      e.preventDefault();
+      applyMark("**");
+    } else if (mod && e.key.toLowerCase() === "i") {
+      e.preventDefault();
+      applyMark("*");
+    } else if (mod && e.key.toLowerCase() === "u") {
+      e.preventDefault();
+      applyMark("__");
+    }
+  };
+
+  useEffect(() => {
+    if (menuAt === null && convertOpenId === null) return;
+    const close = () => {
+      setMenuAt(null);
+      setConvertOpenId(null);
+    };
+    window.addEventListener("click", close);
+    return () => window.removeEventListener("click", close);
+  }, [menuAt, convertOpenId]);
+
+  const isEmptyCanvas =
+    value.length === 1 &&
+    value[0]?.type === "paragraph" &&
+    !(value[0] as Extract<Block, { type: "paragraph" }>).data.text.trim();
+
+  return (
+    <div onKeyDown={onKeyDown} className="relative">
+      {bubblePos && !readOnly && (
+        <EditorBubbleToolbar
+          pos={bubblePos}
+          disabled={!activeField}
+          onBold={() => applyMark("**")}
+          onItalic={() => applyMark("*")}
+          onUnderline={() => applyMark("__")}
+          onStrike={() => applyMark("~~")}
+          onHighlight={() => applyMark("==")}
+          onColor={(hex) => applyMark(`{#${hex}}`, "{/}")}
+          onLink={insertLink}
+        />
+      )}
+      {/* Sticky formatting toolbar */}
+      <div className="sticky top-0 z-20 -mx-2 mb-2 flex flex-wrap items-center gap-1 rounded-lg border border-border/50 bg-background/95 px-2 py-1.5 shadow-sm backdrop-blur supports-[backdrop-filter]:bg-background/80">
+        <ToolButton
+          title="Undo (Ctrl+Z)"
+          disabled={readOnly || !past.current.length}
+          onClick={undo}
+        >
+          <Undo2 className="h-3.5 w-3.5" />
+        </ToolButton>
+        <ToolButton
+          title="Redo (Ctrl+Shift+Z)"
+          disabled={readOnly || !future.current.length}
+          onClick={redo}
+        >
+          <Redo2 className="h-3.5 w-3.5" />
+        </ToolButton>
+        <ToolbarSep />
+        <ToolButton
+          title="Bold (Ctrl+B)"
+          disabled={readOnly || !activeField}
+          onClick={() => applyMark("**")}
+        >
+          <Bold className="h-3.5 w-3.5" />
+        </ToolButton>
+        <ToolButton
+          title="Italic (Ctrl+I)"
+          disabled={readOnly || !activeField}
+          onClick={() => applyMark("*")}
+        >
+          <Italic className="h-3.5 w-3.5" />
+        </ToolButton>
+        <ToolButton
+          title="Underline (Ctrl+U)"
+          disabled={readOnly || !activeField}
+          onClick={() => applyMark("__")}
+        >
+          <Underline className="h-3.5 w-3.5" />
+        </ToolButton>
+        <ToolButton
+          title="Strikethrough"
+          disabled={readOnly || !activeField}
+          onClick={() => applyMark("~~")}
+        >
+          <Strikethrough className="h-3.5 w-3.5" />
+        </ToolButton>
+        <ToolButton
+          title="Highlight"
+          disabled={readOnly || !activeField}
+          onClick={() => applyMark("==")}
+        >
+          <Highlighter className="h-3.5 w-3.5" />
+        </ToolButton>
+        <ToolButton title="Insert link" disabled={readOnly || !activeField} onClick={insertLink}>
+          <Link2 className="h-3.5 w-3.5" />
+        </ToolButton>
+
+        <div className="relative">
+          <ToolButton
+            title="Text color"
+            disabled={readOnly || !activeField}
+            active={colorMenuOpen}
+            onClick={() => {
+              setColorMenuOpen((open) => !open);
+              setSizeMenuOpen(false);
+              setFontMenuOpen(false);
+              setAiMenuOpen(false);
+            }}
+          >
+            <Palette className="h-3.5 w-3.5" />
+          </ToolButton>
+          {colorMenuOpen ? (
+            <div className="absolute left-0 top-full z-30 mt-1 flex gap-1 rounded-lg border border-border bg-card p-1.5 shadow-md">
+              {EDITOR_TEXT_COLORS.map((color) => (
+                <button
+                  key={color.hex}
+                  type="button"
+                  title={color.label}
+                  disabled={readOnly || !activeField}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    applyMark(`{#${color.hex}}`, "{/}");
+                    setColorMenuOpen(false);
+                  }}
+                  className="h-5 w-5 rounded-full border border-border/60 transition hover:scale-110 disabled:opacity-40"
+                  style={{ backgroundColor: `#${color.hex}` }}
+                />
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="relative">
+          <ToolButton
+            title="Font size"
+            disabled={readOnly || !activeField}
+            active={sizeMenuOpen}
+            onClick={() => {
+              setSizeMenuOpen((open) => !open);
+              setColorMenuOpen(false);
+              setFontMenuOpen(false);
+              setAiMenuOpen(false);
+            }}
+          >
+            <Type className="h-3.5 w-3.5" />
+          </ToolButton>
+          {sizeMenuOpen ? (
+            <div className="absolute left-0 top-full z-30 mt-1 min-w-[7rem] rounded-lg border border-border bg-card py-1 shadow-md">
+              {(
+                [
+                  ["sm", "Small"],
+                  ["lg", "Large"],
+                  ["xl", "Extra large"],
+                ] as const
+              ).map(([size, label]) => (
+                <button
+                  key={size}
+                  type="button"
+                  disabled={readOnly || !activeField}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    applyMark(`{size:${size}}`, "{/size}");
+                    setSizeMenuOpen(false);
+                  }}
+                  className="flex w-full px-3 py-1.5 text-left text-xs hover:bg-accent disabled:opacity-40"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <div className="relative">
+          <ToolButton
+            title="Font family"
+            disabled={readOnly || !activeField}
+            active={fontMenuOpen}
+            onClick={() => {
+              setFontMenuOpen((open) => !open);
+              setColorMenuOpen(false);
+              setSizeMenuOpen(false);
+              setAiMenuOpen(false);
+            }}
+          >
+            <span className="text-[10px] font-bold tracking-tight">Aa</span>
+          </ToolButton>
+          {fontMenuOpen ? (
+            <div className="absolute left-0 top-full z-30 mt-1 min-w-[8rem] rounded-lg border border-border bg-card py-1 shadow-md">
+              {(
+                [
+                  ["serif", "Serif"],
+                  ["sans", "Sans"],
+                  ["mono", "Mono"],
+                ] as const
+              ).map(([font, label]) => (
+                <button
+                  key={font}
+                  type="button"
+                  disabled={readOnly || !activeField}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    applyMark(`{font:${font}}`, "{/font}");
+                    setFontMenuOpen(false);
+                  }}
+                  className={cn(
+                    "flex w-full px-3 py-1.5 text-left text-xs hover:bg-accent disabled:opacity-40",
+                    font === "serif" && "font-serif",
+                    font === "sans" && "font-sans",
+                    font === "mono" && "font-mono",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+
+        <ToolbarSep />
+        {([1, 2, 3, 4, 5, 6] as HeadingLevel[]).map((level) => (
+          <ToolButton
+            key={level}
+            title={`Heading ${level}`}
+            active={focusedBlock?.type === "heading" && focusedBlock.data.level === level}
+            disabled={
+              readOnly ||
+              !(
+                focusedBlock &&
+                (focusedBlock.type === "heading" ||
+                  focusedBlock.type === "paragraph" ||
+                  focusedBlock.type === "quote" ||
+                  focusedBlock.type === "pullquote" ||
+                  focusedBlock.type === "callout")
+              )
+            }
+            onClick={() => setHeadingLevel(level)}
+          >
+            <span className="text-[11px] font-bold">H{level}</span>
+          </ToolButton>
+        ))}
+
+        {(focusedBlock?.type === "paragraph" || focusedBlock?.type === "heading") && (
+          <>
+            <ToolbarSep />
+            {(
+              [
+                ["left", AlignLeft],
+                ["center", AlignCenter],
+                ["right", AlignRight],
+                ["justify", AlignJustify],
+              ] as const
+            ).map(([align, Icon]) => (
+              <ToolButton
+                key={align}
+                title={`Align ${align}`}
+                active={(focusedBlock.data.align ?? "left") === align}
+                disabled={readOnly}
+                onClick={() => setTextAlign(align)}
+              >
+                <Icon className="h-3.5 w-3.5" />
+              </ToolButton>
+            ))}
+          </>
+        )}
+
+        {!readOnly && onUploadImage ? (
+          <>
+            <ToolbarSep />
+            <label
+              title="Insert image"
+              className="inline-flex h-8 cursor-pointer items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <ImageIcon className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Image</span>
+              <input
+                type="file"
+                accept="image/*"
+                className="sr-only"
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  e.target.value = "";
+                  if (!file) return;
+                  try {
+                    const url = await onUploadImage(file);
+                    const fi = focusedBlockId
+                      ? value.findIndex((b) => b.id === focusedBlockId)
+                      : -1;
+                    const idx = fi >= 0 ? fi + 1 : value.length;
+                    const image = createBlock("image") as Extract<Block, { type: "image" }>;
+                    image.data = {
+                      ...image.data,
+                      url,
+                      alt: file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " "),
+                    };
+                    const next = [...value];
+                    next.splice(idx, 0, image);
+                    apply(next, image.id);
+                    setFocusedBlockId(image.id);
+                  } catch {
+                    /* ignore */
+                  }
+                }}
+              />
+            </label>
+            <label
+              title="Insert photo pair / gallery (two per row)"
+              className="inline-flex h-8 cursor-pointer items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+            >
+              <Images className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Photos</span>
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                className="sr-only"
+                onChange={async (e) => {
+                  const files = Array.from(e.target.files ?? []).filter((f) =>
+                    f.type.startsWith("image/"),
+                  );
+                  e.target.value = "";
+                  if (!files.length) return;
+                  try {
+                    const uploaded = [];
+                    for (const file of files) {
+                      const url = await onUploadImage(file);
+                      uploaded.push({
+                        url,
+                        alt: file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " "),
+                        fit: "contain" as ImageFit,
+                        widthPercent: 100,
+                      });
+                    }
+                    const fi = focusedBlockId
+                      ? value.findIndex((b) => b.id === focusedBlockId)
+                      : -1;
+                    const idx = fi >= 0 ? fi + 1 : value.length;
+                    const gallery = createBlock("gallery") as Extract<Block, { type: "gallery" }>;
+                    gallery.data = { images: uploaded };
+                    const next = [...value];
+                    next.splice(idx, 0, gallery);
+                    apply(next, gallery.id);
+                    setFocusedBlockId(gallery.id);
+                  } catch {
+                    /* ignore */
+                  }
+                }}
+              />
+            </label>
+          </>
+        ) : null}
+
+        {focusedBlock?.type === "image" && (
+          <>
+            <ToolbarSep />
+            {(
+              [
+                ["left", AlignLeft],
+                ["center", AlignCenter],
+                ["right", AlignRight],
+                ["full", Maximize2],
+              ] as const
+            ).map(([align, Icon]) => (
+              <ToolButton
+                key={align}
+                title={`Align ${align}`}
+                active={focusedBlock.data.align === align}
+                disabled={readOnly}
+                onClick={() => setImageAlign(align)}
+              >
+                <Icon className="h-3.5 w-3.5" />
+              </ToolButton>
+            ))}
+            <ToolbarSep />
+            {(
+              [
+                ["small", "S"],
+                ["medium", "M"],
+                ["large", "L"],
+                ["full", "Full"],
+              ] as const
+            ).map(([size, label]) => (
+              <ToolButton
+                key={size}
+                title={`Size ${size}`}
+                active={focusedBlock.data.size === size}
+                disabled={readOnly}
+                onClick={() => setImageSize(size)}
+              >
+                <span className="text-[11px] font-bold">{label}</span>
+              </ToolButton>
+            ))}
+          </>
+        )}
+
+        <div className="relative ml-auto flex items-center gap-1">
+          <div className="relative">
+            <ToolButton
+              title="Desk AI helpers"
+              disabled={readOnly}
+              active={aiMenuOpen}
+              onClick={() => {
+                setAiMenuOpen((open) => !open);
+                setColorMenuOpen(false);
+                setSizeMenuOpen(false);
+                setFontMenuOpen(false);
+              }}
+            >
+              <Sparkles className="h-3.5 w-3.5" />
+            </ToolButton>
+            {aiMenuOpen ? (
+              <div className="absolute right-0 top-full z-30 mt-1 min-w-[11rem] rounded-lg border border-border bg-card py-1 shadow-md">
+                {(
+                  [
+                    ["Improve writing", improveWriting],
+                    ["Shorten", shortenText],
+                    ["Expand", expandText],
+                    ["Fix grammar", fixGrammar],
+                  ] as const
+                ).map(([label, fn]) => (
+                  <button
+                    key={label}
+                    type="button"
+                    disabled={readOnly || !activeField}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => applyTextTransform(fn)}
+                    className="flex w-full px-3 py-1.5 text-left text-xs hover:bg-accent disabled:opacity-40"
+                  >
+                    {label}
+                  </button>
+                ))}
+                {onOpenAi ? (
+                  <>
+                    <div className="my-1 border-t border-border" />
+                    <button
+                      type="button"
+                      disabled={readOnly}
+                      onClick={() => {
+                        setAiMenuOpen(false);
+                        onOpenAi();
+                      }}
+                      className="flex w-full px-3 py-1.5 text-left text-xs font-medium hover:bg-accent disabled:opacity-40"
+                    >
+                      Open AI panel…
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+          <div className="hidden text-[10px] text-muted-foreground sm:block">
+            <kbd className="rounded border border-border px-1">/</kbd> blocks ·{" "}
+            <kbd className="rounded border border-border px-1">Ctrl+Enter</kbd> paragraph
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-0 py-1">
+        {isEmptyCanvas && !readOnly && (
+          <p className="pointer-events-none mb-3 select-none text-center font-serif text-sm text-muted-foreground/70">
+            Start writing — use the toolbar to insert images, or type{" "}
+            <span className="font-sans font-medium text-muted-foreground">/</span> for more
+          </p>
+        )}
+
+        {value.map((block, index) => (
+          <div key={block.id} className="relative">
+            <AddBlockRow
+              open={menuAt === index}
+              readOnly={readOnly}
+              onToggle={(e) => {
+                e.stopPropagation();
+                setMenuAt(menuAt === index ? null : index);
+              }}
+              onPick={(type) => insertAt(index, type)}
+            />
+            <div
+              draggable={!readOnly}
+              onDragStart={(e) => {
+                setDragId(block.id);
+                e.dataTransfer.effectAllowed = "move";
+              }}
+              onDragEnd={() => {
+                setDragId(null);
+                setOverIndex(null);
+              }}
+              onDragOver={(e) => {
+                if (!dragId) return;
+                e.preventDefault();
+                setOverIndex(index);
+              }}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (!dragId) return;
+                const from = value.findIndex((b) => b.id === dragId);
+                if (from !== -1) moveBlock(from, index);
+                setDragId(null);
+                setOverIndex(null);
+              }}
+              onFocusCapture={() => setFocusedBlockId(block.id)}
+              className={`group relative rounded-sm border transition-colors ${
+                overIndex === index && dragId && dragId !== block.id
+                  ? "border-ring bg-accent/30"
+                  : block.type === "paragraph" || block.type === "heading"
+                    ? "border-transparent"
+                    : "border-transparent hover:border-border/60 focus-within:border-border/80"
+              } ${dragId === block.id ? "opacity-40" : ""}`}
+            >
+              <div className="flex items-start gap-1 px-1 py-0.5 sm:gap-2 sm:px-2">
+                <div className="flex shrink-0 flex-col items-center gap-0.5 pt-2 opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100">
+                  <span
+                    className={`text-muted-foreground ${readOnly ? "" : "cursor-grab active:cursor-grabbing"}`}
+                    title="Drag to reorder"
+                  >
+                    <GripVertical className="h-4 w-4" />
+                  </span>
+                </div>
+                <div className="min-w-0 flex-1 py-1">
+                  <div
+                    className={`mb-0.5 flex items-center justify-between gap-2 transition-opacity ${
+                      block.type === "paragraph"
+                        ? "h-0 overflow-hidden opacity-0 group-focus-within:h-auto group-focus-within:opacity-100 group-hover:h-auto group-hover:opacity-100"
+                        : "opacity-0 group-focus-within:opacity-100 group-hover:opacity-100"
+                    }`}
+                  >
+                    <div className="relative flex items-center gap-1">
+                      {block.type !== "paragraph" ? (
+                        <span className="inline-flex items-center gap-1 text-[10px] font-medium uppercase tracking-[0.1em] text-muted-foreground">
+                          <BlockIcon type={block.type} /> {BLOCK_LABELS[block.type]}
+                        </span>
+                      ) : (
+                        <span className="sr-only">Paragraph</span>
+                      )}
+                      {!readOnly && CONVERTIBLE_TYPES.includes(block.type) && (
+                        <div className="relative">
+                          <button
+                            type="button"
+                            title="Convert block"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConvertOpenId(convertOpenId === block.id ? null : block.id);
+                            }}
+                            className="inline-flex h-5 items-center gap-0.5 rounded px-1 text-[10px] text-muted-foreground hover:bg-accent hover:text-foreground"
+                          >
+                            Convert <ChevronDown className="h-3 w-3" />
+                          </button>
+                          {convertOpenId === block.id && (
+                            <div
+                              className="absolute left-0 top-6 z-20 min-w-[9rem] border border-border bg-popover py-1 shadow-lg"
+                              onClick={(e) => e.stopPropagation()}
+                            >
+                              {CONVERTIBLE_TYPES.filter((t) => t !== block.type).map((type) => (
+                                <button
+                                  key={type}
+                                  type="button"
+                                  onClick={() => convertBlock(block.id, type)}
+                                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-foreground hover:bg-accent"
+                                >
+                                  <BlockIcon type={type} />
+                                  {BLOCK_LABELS[type]}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {!readOnly && (
+                      <span className="flex items-center gap-0.5">
+                        <ToolButton
+                          title="Move up (Alt+↑)"
+                          onClick={() => moveBlock(index, index - 1)}
+                        >
+                          <ArrowUp className="h-3 w-3" />
+                        </ToolButton>
+                        <ToolButton
+                          title="Move down (Alt+↓)"
+                          onClick={() => moveBlock(index, index + 1)}
+                        >
+                          <ArrowDown className="h-3 w-3" />
+                        </ToolButton>
+                        <ToolButton title="Duplicate block" onClick={() => duplicateBlock(index)}>
+                          <Copy className="h-3 w-3" />
+                        </ToolButton>
+                        <ToolButton title="Delete block" onClick={() => removeBlock(block.id)}>
+                          <Trash2 className="h-3 w-3" />
+                        </ToolButton>
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="relative">
+                    <BlockFields
+                      block={block}
+                      readOnly={readOnly}
+                      onUploadImage={onUploadImage}
+                      onChange={(data) => updateBlock(block.id, data)}
+                      onReplaceBlock={(next) => {
+                        apply(
+                          value.map((b) => (b.id === block.id ? { ...next, id: block.id } : b)),
+                          block.id,
+                        );
+                      }}
+                      onInsertAfter={(blocks) => {
+                        const idx = value.findIndex((b) => b.id === block.id);
+                        if (idx === -1 || !blocks.length) return;
+                        const next = [...value];
+                        next.splice(idx + 1, 0, ...blocks);
+                        apply(next, blocks[0]?.id ?? null);
+                      }}
+                      onPasteBlocks={(chunks) => {
+                        const idx = value.findIndex((b) => b.id === block.id);
+                        if (idx === -1 || chunks.length < 2) return;
+                        const [first, ...rest] = chunks;
+                        const next = [...value];
+                        next[idx] = { id: block.id, type: "paragraph", data: { text: first } };
+                        const restJoined = rest.join("\n\n");
+                        if (pasteLooksLikeList(restJoined)) {
+                          const listBlock = createBlock("list") as Extract<Block, { type: "list" }>;
+                          listBlock.data = { style: "bullet", items: pasteToListItems(restJoined) };
+                          next.splice(idx + 1, 0, listBlock);
+                        } else {
+                          next.splice(
+                            idx + 1,
+                            0,
+                            ...rest.map((text) => {
+                              const para = createBlock("paragraph") as Extract<
+                                Block,
+                                { type: "paragraph" }
+                              >;
+                              para.data = { text };
+                              return para;
+                            }),
+                          );
+                        }
+                        apply(next, block.id);
+                      }}
+                      onFocusField={(el) => focusField(block.id, el)}
+                      onBlurField={blurField}
+                      onSelectField={updateBubble}
+                      onSlashQuery={(query) => {
+                        if (query === null) setSlashAt(null);
+                        else setSlashAt({ blockId: block.id, query });
+                      }}
+                      onKeyDown={(e) => {
+                        if (readOnly) return;
+
+                        if (slashAt?.blockId === block.id && filteredSlash.length) {
+                          if (e.key === "ArrowDown") {
+                            e.preventDefault();
+                            setSlashIndex((i) => (i + 1) % filteredSlash.length);
+                            return;
+                          }
+                          if (e.key === "ArrowUp") {
+                            e.preventDefault();
+                            setSlashIndex(
+                              (i) => (i - 1 + filteredSlash.length) % filteredSlash.length,
+                            );
+                            return;
+                          }
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            pickSlash(filteredSlash[slashIndex] ?? filteredSlash[0]);
+                            return;
+                          }
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            setSlashAt(null);
+                            return;
+                          }
+                        }
+
+                        if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+                          e.preventDefault();
+                          insertAt(index + 1, "paragraph");
+                        } else if (e.altKey && e.key === "ArrowUp") {
+                          e.preventDefault();
+                          moveBlock(index, index - 1);
+                        } else if (e.altKey && e.key === "ArrowDown") {
+                          e.preventDefault();
+                          moveBlock(index, index + 1);
+                        }
+                      }}
+                    />
+
+                    {slashAt?.blockId === block.id && filteredSlash.length > 0 && (
+                      <div
+                        className="absolute left-0 top-full z-40 mt-1 max-h-64 w-64 overflow-y-auto border border-border bg-popover shadow-lg"
+                        onMouseDown={(e) => e.preventDefault()}
+                      >
+                        {filteredSlash.map((type, i) => {
+                          const Icon = BLOCK_ICONS[type];
+                          return (
+                            <button
+                              key={type}
+                              type="button"
+                              onClick={() => pickSlash(type)}
+                              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm ${
+                                i === slashIndex
+                                  ? "bg-accent text-foreground"
+                                  : "text-muted-foreground hover:bg-accent/60 hover:text-foreground"
+                              }`}
+                            >
+                              <Icon className="h-4 w-4 shrink-0" />
+                              <span>{BLOCK_LABELS[type]}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+
+        <AddBlockRow
+          open={menuAt === value.length}
+          readOnly={readOnly}
+          always
+          onToggle={(e) => {
+            e.stopPropagation();
+            setMenuAt(menuAt === value.length ? null : value.length);
+          }}
+          onPick={(type) => insertAt(value.length, type)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function BlockIcon({ type }: { type: BlockType }) {
+  const Icon = BLOCK_ICONS[type];
+  return <Icon className="h-3 w-3" />;
+}
+
+function ToolbarSep() {
+  return <span className="mx-0.5 h-4 w-px bg-border" aria-hidden />;
+}
+
+function ToolButton({
+  title,
+  onClick,
+  children,
+  disabled,
+  active,
+}: {
+  title: string;
+  onClick: () => void;
+  children: ReactNode;
+  disabled?: boolean;
+  active?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex h-7 min-w-7 items-center justify-center rounded-sm px-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40 ${
+        active ? "bg-accent text-foreground" : ""
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function AddBlockRow({
+  open,
+  always,
+  readOnly,
+  onToggle,
+  onPick,
+}: {
+  open: boolean;
+  always?: boolean;
+  readOnly?: boolean;
+  onToggle: (e: React.MouseEvent) => void;
+  onPick: (type: BlockType) => void;
+}) {
+  if (readOnly) return null;
+  return (
+    <div
+      className={`relative ${
+        always
+          ? "mt-4"
+          : "h-1 opacity-0 transition-all hover:h-auto hover:opacity-100 focus-within:h-auto focus-within:opacity-100"
+      }`}
+    >
+      <div className="flex items-center gap-2 py-0.5">
+        <button
+          type="button"
+          onClick={onToggle}
+          className={`inline-flex h-6 items-center gap-1 rounded-sm border border-dashed border-border/80 px-2 text-[11px] font-medium text-muted-foreground hover:border-foreground/30 hover:bg-accent/50 hover:text-foreground ${
+            always ? "w-full justify-center" : ""
+          }`}
+        >
+          <Plus className="h-3 w-3" /> Add block
+        </button>
+      </div>
+      {open && (
+        <div
+          className="absolute left-0 top-8 z-20 grid w-72 grid-cols-3 gap-1 border border-border bg-popover p-2 shadow-lg"
+          onClick={(e) => e.stopPropagation()}
+        >
+          {BLOCK_MENU.map((type) => {
+            const Icon = BLOCK_ICONS[type];
+            return (
+              <button
+                key={type}
+                type="button"
+                onClick={() => onPick(type)}
+                className="flex flex-col items-center gap-1 rounded-sm border border-transparent px-2 py-2 text-[10px] font-semibold text-muted-foreground hover:border-input hover:bg-accent hover:text-foreground"
+              >
+                <Icon className="h-4 w-4" />
+                {BLOCK_LABELS[type]}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const canvasField =
+  "w-full border-0 bg-transparent px-1 py-1 text-foreground outline-none placeholder:text-muted-foreground/50 focus:outline-none";
+
+function BlockFields({
+  block,
+  readOnly,
+  onChange,
+  onReplaceBlock,
+  onPasteBlocks,
+  onInsertAfter,
+  onKeyDown,
+  onUploadImage,
+  onFocusField,
+  onBlurField,
+  onSelectField,
+  onSlashQuery,
+}: {
+  block: Block;
+  readOnly?: boolean;
+  onChange: (data: Block["data"]) => void;
+  onReplaceBlock: (next: Block) => void;
+  onPasteBlocks?: (chunks: string[]) => void;
+  onInsertAfter?: (blocks: Block[]) => void;
+  onKeyDown: (e: React.KeyboardEvent) => void;
+  onUploadImage?: (file: File) => Promise<string>;
+  onFocusField: (el: HTMLTextAreaElement | HTMLInputElement) => void;
+  onBlurField?: () => void;
+  onSelectField?: () => void;
+  onSlashQuery: (query: string | null) => void;
+}) {
+  const [damOpen, setDamOpen] = useState(false);
+
+  const common = {
+    disabled: readOnly,
+    onKeyDown,
+    onFocus: (e: React.FocusEvent<HTMLTextAreaElement | HTMLInputElement>) =>
+      onFocusField(e.currentTarget),
+    onBlur: () => onBlurField?.(),
+    onSelect: () => onSelectField?.(),
+    onMouseUp: () => onSelectField?.(),
+    onKeyUp: () => onSelectField?.(),
+  };
+
+  const uploadDroppedImage = async (file: File, mode: "image" | "paragraph") => {
+    if (!onUploadImage || readOnly) return;
+    if (!file.type.startsWith("image/")) return;
+    try {
+      const url = await onUploadImage(file);
+      const alt = file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " ");
+      const imageData = {
+        url,
+        alt,
+        caption: "",
+        credit: "",
+        align: "full" as ImageAlign,
+        size: "full" as ImageSize,
+        widthPercent: 100,
+        heightPercent: 100,
+        fit: "original" as ImageFit,
+      };
+      if (mode === "image" && block.type === "image") {
+        onChange({
+          ...block.data,
+          url,
+          alt: block.data.alt || alt,
+        });
+      } else if (mode === "paragraph") {
+        const empty =
+          block.type === "paragraph"
+            ? !block.data.text.trim()
+            : !(block as { data?: { text?: string } }).data?.text?.trim();
+        if (empty) {
+          onReplaceBlock({
+            id: block.id,
+            type: "image",
+            data: imageData,
+          });
+        } else {
+          onInsertAfter?.([
+            {
+              id: createBlock("image").id,
+              type: "image",
+              data: imageData,
+            },
+          ]);
+        }
+      }
+    } catch {
+      /* ignore upload errors */
+    }
+  };
+
+  const pasteClipboardImage = async (e: React.ClipboardEvent, mode: "image" | "paragraph") => {
+    if (!onUploadImage || readOnly) return false;
+    const items = Array.from(e.clipboardData?.items ?? []);
+    const imageItem = items.find((item) => item.type.startsWith("image/"));
+    if (!imageItem) return false;
+    const file = imageItem.getAsFile();
+    if (!file) return false;
+    e.preventDefault();
+    await uploadDroppedImage(file, mode);
+    return true;
+  };
+
+  const handleRichTextPaste = (
+    e: React.ClipboardEvent<HTMLTextAreaElement | HTMLInputElement>,
+    currentText: string,
+    applyText: (next: string, selectionStart: number, selectionEnd: number) => void,
+    opts?: { allowMultiBlock?: boolean },
+  ) => {
+    if (readOnly) return;
+    const cleaned = clipboardToEditorText(e.clipboardData);
+    if (cleaned == null) return;
+
+    const html = e.clipboardData.getData("text/html");
+    const isRich = !!(html && looksLikeRichHtml(html));
+    const chunks = splitPasteParagraphs(cleaned);
+    const empty = !currentText.trim();
+
+    if (opts?.allowMultiBlock && empty && chunks.length >= 2 && onPasteBlocks) {
+      e.preventDefault();
+      onPasteBlocks(chunks);
+      return;
+    }
+
+    if (!isRich) return;
+
+    e.preventDefault();
+    const el = e.currentTarget;
+    const start = el.selectionStart ?? currentText.length;
+    const end = el.selectionEnd ?? currentText.length;
+    const result = insertAtCaret(currentText, start, end, cleaned);
+    applyText(result.text, result.selectionStart, result.selectionEnd);
+    requestAnimationFrame(() => {
+      el.focus();
+      el.setSelectionRange(result.selectionStart, result.selectionEnd);
+    });
+  };
+
+  switch (block.type) {
+    case "paragraph":
+      return (
+        <AutoTextarea
+          {...common}
+          value={block.data.text}
+          placeholder="Start writing your article..."
+          onChange={(text) => {
+            onChange({ ...block.data, text });
+            if (
+              text === "/" ||
+              (text.startsWith("/") && !text.includes("\n") && text.length < 40)
+            ) {
+              onSlashQuery(text.slice(1));
+            } else {
+              onSlashQuery(null);
+            }
+          }}
+          onPaste={(e) => {
+            const hasImage = Array.from(e.clipboardData?.items ?? []).some((item) =>
+              item.type.startsWith("image/"),
+            );
+            if (hasImage && onUploadImage && !readOnly) {
+              void pasteClipboardImage(e, "paragraph");
+              return;
+            }
+            handleRichTextPaste(
+              e,
+              block.data.text,
+              (text) => {
+                onChange({ ...block.data, text });
+                onSlashQuery(null);
+              },
+              { allowMultiBlock: true },
+            );
+          }}
+          className={`${canvasField} font-serif text-[1.125rem] leading-8 ${
+            block.data.align === "center"
+              ? "text-center"
+              : block.data.align === "right"
+                ? "text-right"
+                : block.data.align === "justify"
+                  ? "text-justify"
+                  : "text-left"
+          }`}
+        />
+      );
+    case "heading": {
+      const size =
+        block.data.level === 1
+          ? "text-3xl font-bold"
+          : block.data.level === 2
+            ? "text-2xl font-semibold"
+            : block.data.level === 3
+              ? "text-xl font-semibold"
+              : block.data.level === 4
+                ? "text-lg font-medium"
+                : block.data.level === 5
+                  ? "text-base font-medium"
+                  : "text-sm font-medium uppercase tracking-wide";
+      return (
+        <div className="flex items-start gap-2">
+          <input
+            {...common}
+            value={block.data.text}
+            placeholder={`Heading ${block.data.level}`}
+            onChange={(e) => onChange({ ...block.data, text: e.target.value })}
+            onPaste={(e) =>
+              handleRichTextPaste(e, block.data.text, (text) => onChange({ ...block.data, text }))
+            }
+            className={`${canvasField} font-serif ${size} ${
+              block.data.align === "center"
+                ? "text-center"
+                : block.data.align === "right"
+                  ? "text-right"
+                  : block.data.align === "justify"
+                    ? "text-justify"
+                    : "text-left"
+            }`}
+          />
+          <select
+            disabled={readOnly}
+            value={block.data.level}
+            onChange={(e) =>
+              onChange({ ...block.data, level: Number(e.target.value) as HeadingLevel })
+            }
+            className="mt-1 h-8 shrink-0 rounded-sm border-0 bg-transparent px-1 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-accent"
+          >
+            <option value={1}>H1</option>
+            <option value={2}>H2</option>
+            <option value={3}>H3</option>
+            <option value={4}>H4</option>
+            <option value={5}>H5</option>
+            <option value={6}>H6</option>
+          </select>
+        </div>
+      );
+    }
+    case "image":
+      return (
+        <div
+          className="space-y-2"
+          onPaste={(e) => void pasteClipboardImage(e, "image")}
+          onDragOver={(e) => {
+            if (!onUploadImage || readOnly) return;
+            if (Array.from(e.dataTransfer.types).includes("Files")) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "copy";
+            }
+          }}
+          onDrop={(e) => {
+            if (!onUploadImage || readOnly) return;
+            const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("image/"));
+            if (!file) return;
+            e.preventDefault();
+            e.stopPropagation();
+            void uploadDroppedImage(file, "image");
+          }}
+        >
+          {block.data.url ? (
+            <div
+              className={`${IMAGE_SIZE_PREVIEW[block.data.size ?? "full"]} ${
+                block.data.align === "left"
+                  ? "mr-auto"
+                  : block.data.align === "right"
+                    ? "ml-auto"
+                    : block.data.align === "center"
+                      ? "mx-auto"
+                      : ""
+              }`}
+              style={{
+                width: `${block.data.widthPercent ?? 100}%`,
+                maxWidth: "100%",
+              }}
+            >
+              <div
+                className={
+                  (block.data.fit ?? "original") === "cover"
+                    ? "overflow-hidden rounded-md border border-border/50 bg-muted aspect-[16/10]"
+                    : "overflow-hidden rounded-md border border-border/50 bg-muted/30"
+                }
+              >
+                <img
+                  src={block.data.url}
+                  alt={block.data.alt}
+                  className={imageFitClass(block.data.fit ?? "original")}
+                  style={
+                    (block.data.fit ?? "original") !== "cover" && block.data.maxHeight
+                      ? { maxHeight: block.data.maxHeight, width: "auto" }
+                      : (block.data.fit ?? "original") !== "cover"
+                        ? { maxHeight: 320 }
+                        : undefined
+                  }
+                />
+              </div>
+              <p className="mt-1 text-[10px] text-muted-foreground">
+                Preview matches published layout · {(block.data.fit ?? "original").toUpperCase()} ·{" "}
+                {block.data.widthPercent ?? 100}% wide
+              </p>
+            </div>
+          ) : (
+            !readOnly && (
+              <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center active:bg-muted/40">
+                <ImageIcon className="h-6 w-6 text-muted-foreground" />
+                <p className="text-xs text-muted-foreground">
+                  Tap to upload one or more photos, or drop / paste
+                </p>
+                {onUploadImage ? (
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="sr-only"
+                    onChange={async (e) => {
+                      const files = Array.from(e.target.files ?? []).filter((f) =>
+                        f.type.startsWith("image/"),
+                      );
+                      e.target.value = "";
+                      if (!files.length) return;
+                      if (files.length === 1) {
+                        await uploadDroppedImage(files[0]!, "image");
+                        return;
+                      }
+                      const uploaded = [];
+                      for (const file of files) {
+                        const url = await onUploadImage(file);
+                        uploaded.push({
+                          url,
+                          alt: file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " "),
+                          fit: "original" as ImageFit,
+                          widthPercent: 100,
+                        });
+                      }
+                      onReplaceBlock({
+                        id: block.id,
+                        type: "gallery",
+                        data: { images: uploaded, layout: "pair" },
+                      });
+                    }}
+                  />
+                ) : null}
+              </label>
+            )
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-0 flex-1">
+              <MediaUrlInput
+                readOnly={readOnly}
+                url={block.data.url}
+                onUrl={(url) => onChange({ ...block.data, url })}
+                onUploadImage={onUploadImage}
+                placeholder="Image URL, upload, or drop file"
+              />
+            </div>
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setDamOpen(true)}
+                className="inline-flex h-10 shrink-0 items-center gap-1 rounded-md border border-border px-3 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground sm:h-8 sm:border-0 sm:px-2"
+              >
+                <FolderOpen className="h-3.5 w-3.5" /> Library
+              </button>
+            )}
+          </div>
+          <DamAssetPicker
+            open={damOpen}
+            onClose={() => setDamOpen(false)}
+            assetType="image"
+            title="Pick image"
+            onPick={(asset) => {
+              onChange({
+                ...block.data,
+                url: asset.url,
+                alt: asset.alt || block.data.alt,
+                caption: asset.caption || block.data.caption,
+                credit: asset.credit || block.data.credit,
+              });
+              setDamOpen(false);
+            }}
+          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <div>
+              <input
+                {...common}
+                value={block.data.alt}
+                placeholder="Alt text (required for accessibility)"
+                onChange={(e) => onChange({ ...block.data, alt: e.target.value })}
+                className={`${canvasField} text-xs ${
+                  block.data.url && !block.data.alt.trim() ? "ring-1 ring-amber-400/60" : ""
+                }`}
+              />
+              {block.data.url && !block.data.alt.trim() ? (
+                <p className="mt-1 text-[10px] text-amber-700 dark:text-amber-400">
+                  Add alt text so screen readers can describe this image
+                </p>
+              ) : null}
+            </div>
+            <input
+              {...common}
+              value={block.data.caption}
+              placeholder="Caption"
+              onChange={(e) => onChange({ ...block.data, caption: e.target.value })}
+              className={`${canvasField} text-xs`}
+            />
+            <input
+              {...common}
+              value={block.data.credit}
+              placeholder="Credit / source"
+              onChange={(e) => onChange({ ...block.data, credit: e.target.value })}
+              className={`${canvasField} text-xs`}
+            />
+            <select
+              disabled={readOnly}
+              value={block.data.align}
+              onChange={(e) => onChange({ ...block.data, align: e.target.value as ImageAlign })}
+              className="h-9 rounded-sm border border-border bg-background px-2 text-xs text-muted-foreground sm:h-8 sm:border-0 sm:bg-transparent sm:px-1"
+            >
+              <option value="full">Full width</option>
+              <option value="center">Center</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+            </select>
+            <select
+              disabled={readOnly}
+              value={block.data.size ?? "full"}
+              onChange={(e) => onChange({ ...block.data, size: e.target.value as ImageSize })}
+              className="h-9 rounded-sm border border-border bg-background px-2 text-xs text-muted-foreground sm:h-8 sm:border-0 sm:bg-transparent sm:px-1"
+            >
+              <option value="small">Size S</option>
+              <option value="medium">Size M</option>
+              <option value="large">Size L</option>
+              <option value="full">Full width</option>
+            </select>
+            <select
+              disabled={readOnly}
+              value={block.data.fit ?? "original"}
+              onChange={(e) => onChange({ ...block.data, fit: e.target.value as ImageFit })}
+              className="h-9 rounded-sm border border-border bg-background px-2 text-xs text-muted-foreground sm:h-8 sm:border-0 sm:bg-transparent sm:px-1"
+            >
+              <option value="original">Original size (no crop)</option>
+              <option value="contain">Fit / contain</option>
+              <option value="cover">Crop / cover</option>
+            </select>
+            <label className="flex items-center gap-2 px-1 text-[11px] text-muted-foreground">
+              Width
+              <input
+                type="range"
+                min={25}
+                max={100}
+                step={5}
+                disabled={readOnly}
+                value={block.data.widthPercent ?? 100}
+                onChange={(e) => onChange({ ...block.data, widthPercent: Number(e.target.value) })}
+                className="min-w-0 flex-1"
+              />
+              <span className="w-8 tabular-nums">{block.data.widthPercent ?? 100}%</span>
+            </label>
+            <label className="flex items-center gap-2 px-1 text-[11px] text-muted-foreground">
+              Height
+              <input
+                type="range"
+                min={50}
+                max={150}
+                step={5}
+                disabled={readOnly || (block.data.fit ?? "original") === "cover"}
+                value={block.data.heightPercent ?? 100}
+                onChange={(e) => {
+                  const heightPercent = Number(e.target.value);
+                  onChange({
+                    ...block.data,
+                    heightPercent,
+                    maxHeight: Math.round(720 * (heightPercent / 100)),
+                  });
+                }}
+                className="min-w-0 flex-1"
+              />
+              <span className="w-10 tabular-nums">{block.data.heightPercent ?? 100}%</span>
+            </label>
+            <p className="sm:col-span-2 text-[10px] text-muted-foreground">
+              Width and height keep the original aspect ratio (no stretching). Use Crop only for a
+              fixed frame.
+            </p>
+          </div>
+        </div>
+      );
+    case "video":
+      return (
+        <div
+          className="space-y-2"
+          onDragOver={(e) => {
+            if (!onUploadImage || readOnly) return;
+            if (Array.from(e.dataTransfer.types).includes("Files")) {
+              e.preventDefault();
+              e.dataTransfer.dropEffect = "copy";
+            }
+          }}
+          onDrop={(e) => {
+            if (!onUploadImage || readOnly) return;
+            const file = Array.from(e.dataTransfer.files).find((f) => f.type.startsWith("video/"));
+            if (!file) return;
+            e.preventDefault();
+            e.stopPropagation();
+            void (async () => {
+              try {
+                const url = await onUploadImage(file);
+                onChange({ ...block.data, url });
+              } catch {
+                /* ignore */
+              }
+            })();
+          }}
+        >
+          {!block.data.url && !readOnly ? (
+            <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border/80 bg-muted/20 px-4 py-8 text-center">
+              <Video className="h-6 w-6 text-muted-foreground" />
+              <p className="text-xs text-muted-foreground">
+                Drop a video file, paste a URL, or pick from the library
+              </p>
+            </div>
+          ) : null}
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              {...common}
+              value={block.data.url}
+              placeholder="Video URL (YouTube, Vimeo, or direct .mp4)"
+              onChange={(e) => onChange({ ...block.data, url: e.target.value })}
+              className={`${canvasField} min-w-0 flex-1 text-xs`}
+            />
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setDamOpen(true)}
+                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-md px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <FolderOpen className="h-3.5 w-3.5" /> Library
+              </button>
+            )}
+          </div>
+          <DamAssetPicker
+            open={damOpen}
+            onClose={() => setDamOpen(false)}
+            assetType="video"
+            title="Pick video"
+            onPick={(asset) => {
+              onChange({ ...block.data, url: asset.url });
+              setDamOpen(false);
+            }}
+          />
+          <VideoPreview url={block.data.url} />
+          <input
+            {...common}
+            value={block.data.caption}
+            placeholder="Caption (optional)"
+            onChange={(e) => onChange({ ...block.data, caption: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+        </div>
+      );
+    case "audio":
+      return (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              {...common}
+              value={block.data.url}
+              placeholder="Audio URL"
+              onChange={(e) => onChange({ ...block.data, url: e.target.value })}
+              className={`${canvasField} min-w-0 flex-1 text-xs`}
+            />
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setDamOpen(true)}
+                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-sm px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <FolderOpen className="h-3.5 w-3.5" /> Library
+              </button>
+            )}
+          </div>
+          <DamAssetPicker
+            open={damOpen}
+            onClose={() => setDamOpen(false)}
+            assetType="audio"
+            title="Pick audio"
+            onPick={(asset) => {
+              onChange({
+                ...block.data,
+                url: asset.url,
+                title: block.data.title || asset.fileName,
+                caption: asset.caption || block.data.caption,
+              });
+              setDamOpen(false);
+            }}
+          />
+          {block.data.url ? (
+            <audio controls src={block.data.url} className="w-full" preload="metadata" />
+          ) : null}
+          <input
+            {...common}
+            value={block.data.title}
+            placeholder="Title"
+            onChange={(e) => onChange({ ...block.data, title: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+          <input
+            {...common}
+            value={block.data.caption}
+            placeholder="Caption (optional)"
+            onChange={(e) => onChange({ ...block.data, caption: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+        </div>
+      );
+    case "file":
+      return (
+        <div className="space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              {...common}
+              value={block.data.url}
+              placeholder="File URL"
+              onChange={(e) => onChange({ ...block.data, url: e.target.value })}
+              className={`${canvasField} min-w-0 flex-1 text-xs`}
+            />
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setDamOpen(true)}
+                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-sm px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <FolderOpen className="h-3.5 w-3.5" /> Library
+              </button>
+            )}
+          </div>
+          <DamAssetPicker
+            open={damOpen}
+            onClose={() => setDamOpen(false)}
+            assetType="document"
+            title="Pick file"
+            onPick={(asset) => {
+              onChange({
+                ...block.data,
+                url: asset.url,
+                title: block.data.title || asset.fileName,
+                fileName: asset.fileName,
+                fileType: asset.mimeType || block.data.fileType,
+              });
+              setDamOpen(false);
+            }}
+          />
+          <input
+            {...common}
+            value={block.data.title}
+            placeholder="Title"
+            onChange={(e) => onChange({ ...block.data, title: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              {...common}
+              value={block.data.fileName}
+              placeholder="File name"
+              onChange={(e) => onChange({ ...block.data, fileName: e.target.value })}
+              className={`${canvasField} text-xs`}
+            />
+            <input
+              {...common}
+              value={block.data.fileType}
+              placeholder="File type (e.g. application/pdf)"
+              onChange={(e) => onChange({ ...block.data, fileType: e.target.value })}
+              className={`${canvasField} text-xs`}
+            />
+          </div>
+          {block.data.url ? (
+            <a
+              href={block.data.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-xs text-crimson hover:underline"
+            >
+              <File className="h-3.5 w-3.5" />
+              {block.data.title || block.data.fileName || "Download file"}
+            </a>
+          ) : null}
+        </div>
+      );
+    case "quote":
+      return (
+        <div className="space-y-2 border-l-2 border-crimson pl-4">
+          <AutoTextarea
+            {...common}
+            value={block.data.text}
+            placeholder="Quote…"
+            onChange={(text) => onChange({ ...block.data, text })}
+            onPaste={(e) =>
+              handleRichTextPaste(e, block.data.text, (text) => onChange({ ...block.data, text }))
+            }
+            className={`${canvasField} font-serif text-lg italic leading-7`}
+          />
+          <input
+            {...common}
+            value={block.data.attribution}
+            placeholder="Attribution"
+            onChange={(e) => onChange({ ...block.data, attribution: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+        </div>
+      );
+    case "pullquote":
+      return (
+        <div className="space-y-3 py-4 text-center">
+          <AutoTextarea
+            {...common}
+            value={block.data.text}
+            placeholder="Pull quote…"
+            onChange={(text) => onChange({ ...block.data, text })}
+            onPaste={(e) =>
+              handleRichTextPaste(e, block.data.text, (text) => onChange({ ...block.data, text }))
+            }
+            className={`${canvasField} text-center font-serif text-2xl font-medium italic leading-snug`}
+          />
+          <input
+            {...common}
+            value={block.data.attribution}
+            placeholder="Attribution"
+            onChange={(e) => onChange({ ...block.data, attribution: e.target.value })}
+            className={`${canvasField} text-center text-xs`}
+          />
+        </div>
+      );
+    case "callout":
+      return (
+        <div className="space-y-2 rounded-xl border border-border/70 bg-muted/20 px-3 py-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <Info className="h-3.5 w-3.5 text-muted-foreground" />
+            <select
+              disabled={readOnly}
+              value={block.data.tone}
+              onChange={(e) => onChange({ ...block.data, tone: e.target.value as CalloutTone })}
+              className="h-7 rounded-md border-0 bg-transparent text-xs font-semibold text-muted-foreground hover:bg-accent"
+            >
+              <option value="info">Info</option>
+              <option value="tip">Tip</option>
+              <option value="warning">Warning</option>
+              <option value="urgent">Urgent</option>
+            </select>
+            <input
+              {...common}
+              value={block.data.title}
+              placeholder="Callout title (optional)"
+              onChange={(e) => onChange({ ...block.data, title: e.target.value })}
+              className={`${canvasField} flex-1 text-xs font-semibold`}
+            />
+          </div>
+          <AutoTextarea
+            {...common}
+            value={block.data.text}
+            placeholder="Callout body…"
+            onChange={(text) => onChange({ ...block.data, text })}
+            onPaste={(e) =>
+              handleRichTextPaste(e, block.data.text, (text) => onChange({ ...block.data, text }))
+            }
+            className={`${canvasField} text-[0.95rem] leading-7`}
+          />
+        </div>
+      );
+    case "list": {
+      const ListIcon =
+        block.data.style === "numbered"
+          ? ListOrdered
+          : block.data.style === "check"
+            ? CheckSquare
+            : List;
+      return (
+        <div className="space-y-2">
+          <div className="flex items-center gap-2 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+            <ListIcon className="h-3.5 w-3.5 text-muted-foreground" />
+            <select
+              disabled={readOnly}
+              value={block.data.style}
+              onChange={(e) => onChange({ ...block.data, style: e.target.value as ListStyle })}
+              className="h-7 rounded-sm border-0 bg-transparent text-xs text-muted-foreground hover:bg-accent"
+            >
+              <option value="bullet">Bulleted</option>
+              <option value="numbered">Numbered</option>
+              <option value="check">Checklist</option>
+            </select>
+          </div>
+          <ul className="space-y-1">
+            {block.data.items.map((item, i) => (
+              <li key={i} className="flex items-start gap-2">
+                {block.data.style === "check" ? (
+                  <input
+                    type="checkbox"
+                    disabled={readOnly}
+                    checked={!!item.checked}
+                    onChange={(e) =>
+                      onChange({
+                        ...block.data,
+                        items: block.data.items.map((it, j) =>
+                          j === i ? { ...it, checked: e.target.checked } : it,
+                        ),
+                      })
+                    }
+                    className="mt-2.5"
+                  />
+                ) : block.data.style === "numbered" ? (
+                  <span className="mt-1.5 w-5 shrink-0 text-right text-sm text-muted-foreground">
+                    {i + 1}.
+                  </span>
+                ) : (
+                  <span className="mt-1.5 w-4 shrink-0 text-center text-muted-foreground">•</span>
+                )}
+                <AutoTextarea
+                  {...common}
+                  value={item.text}
+                  placeholder="List item"
+                  onChange={(text) =>
+                    onChange({
+                      ...block.data,
+                      items: block.data.items.map((it, j) => (j === i ? { ...it, text } : it)),
+                    })
+                  }
+                  onKeyDown={(e) => {
+                    if (
+                      !readOnly &&
+                      e.key === "Enter" &&
+                      !e.shiftKey &&
+                      !(e.ctrlKey || e.metaKey)
+                    ) {
+                      if (item.text.trim()) {
+                        e.preventDefault();
+                        const items = [...block.data.items];
+                        items.splice(i + 1, 0, {
+                          text: "",
+                          ...(block.data.style === "check" ? { checked: false } : {}),
+                        });
+                        onChange({ ...block.data, items });
+                        return;
+                      }
+                    }
+                    if (
+                      !readOnly &&
+                      e.key === "Backspace" &&
+                      !item.text &&
+                      (e.currentTarget.selectionStart ?? 0) === 0
+                    ) {
+                      if (block.data.items.length > 1) {
+                        e.preventDefault();
+                        onChange({
+                          ...block.data,
+                          items: block.data.items.filter((_, j) => j !== i),
+                        });
+                        return;
+                      }
+                    }
+                    onKeyDown(e);
+                  }}
+                  className={`${canvasField} font-serif text-base leading-7${
+                    item.checked ? " text-muted-foreground line-through" : ""
+                  }`}
+                />
+                {!readOnly && (
+                  <button
+                    type="button"
+                    title="Remove item"
+                    onClick={() =>
+                      onChange({
+                        ...block.data,
+                        items:
+                          block.data.items.length <= 1
+                            ? [{ text: "" }]
+                            : block.data.items.filter((_, j) => j !== i),
+                      })
+                    }
+                    className="mt-1.5 opacity-0 text-muted-foreground hover:text-crimson group-hover:opacity-100"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                )}
+              </li>
+            ))}
+          </ul>
+          {!readOnly && (
+            <button
+              type="button"
+              onClick={() =>
+                onChange({ ...block.data, items: [...block.data.items, { text: "" }] })
+              }
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+            >
+              <Plus className="h-3 w-3" /> Add item
+            </button>
+          )}
+        </div>
+      );
+    }
+    case "divider":
+      return <hr className="my-4 border-t border-border" />;
+    case "embed":
+      return (
+        <div className="space-y-2">
+          <input
+            {...common}
+            value={block.data.url}
+            placeholder="Embed URL (YouTube, Vimeo…)"
+            onChange={(e) => onChange({ ...block.data, url: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+          {block.data.url &&
+            (embedSrc(block.data.url) ? (
+              <iframe
+                src={embedSrc(block.data.url)!}
+                title="Embed preview"
+                className="aspect-video w-full border border-border/50"
+                allowFullScreen
+              />
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                No inline preview for this provider — it will render as an external link.
+              </p>
+            ))}
+          <input
+            {...common}
+            value={block.data.caption}
+            placeholder="Caption (optional)"
+            onChange={(e) => onChange({ ...block.data, caption: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+        </div>
+      );
+    case "gallery":
+      return (
+        <div className="space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-[11px] text-muted-foreground">
+              {(block.data.layout ?? "pair") === "pair"
+                ? "Two photos per row · odd final image centers alone"
+                : (block.data.layout ?? "pair") === "single"
+                  ? "One photo per row"
+                  : "Full-width stacked photos"}
+            </p>
+            <select
+              disabled={readOnly}
+              value={block.data.layout ?? "pair"}
+              onChange={(e) => onChange({ ...block.data, layout: e.target.value as GalleryLayout })}
+              className="h-8 rounded-sm border border-border bg-background px-2 text-[11px]"
+            >
+              <option value="pair">Two-column</option>
+              <option value="single">Single column</option>
+              <option value="full">Full width</option>
+            </select>
+          </div>
+          {block.data.images.length > 0 && (
+            <div
+              className={
+                (block.data.layout ?? "pair") === "pair"
+                  ? "grid grid-cols-1 gap-3 sm:grid-cols-2"
+                  : "grid grid-cols-1 gap-3"
+              }
+            >
+              {block.data.images.map((img, i) => {
+                const oddLast =
+                  (block.data.layout ?? "pair") === "pair" &&
+                  block.data.images.length % 2 === 1 &&
+                  i === block.data.images.length - 1;
+                return (
+                  <div
+                    key={`${img.url}-${i}`}
+                    className={`group/img relative rounded-md border border-border/60 p-2 ${
+                      oddLast ? "sm:col-span-2 sm:mx-auto sm:w-[calc(50%-0.375rem)]" : ""
+                    }`}
+                  >
+                    <div
+                      className={
+                        (img.fit ?? "original") === "cover"
+                          ? "aspect-[16/10] overflow-hidden rounded border border-border/40 bg-muted"
+                          : "flex max-h-56 items-center justify-center overflow-hidden rounded border border-border/40 bg-muted/30"
+                      }
+                    >
+                      <img
+                        src={img.url}
+                        alt={img.alt}
+                        className={imageFitClass(img.fit ?? "original")}
+                        style={(img.fit ?? "original") !== "cover" ? { maxHeight: 224 } : undefined}
+                      />
+                    </div>
+                    {!readOnly && (
+                      <div className="absolute right-2 top-2 flex gap-1">
+                        <button
+                          type="button"
+                          title="Move left"
+                          disabled={i === 0}
+                          onClick={() => {
+                            if (i === 0) return;
+                            const images = [...block.data.images];
+                            const [moved] = images.splice(i, 1);
+                            images.splice(i - 1, 0, moved);
+                            onChange({ ...block.data, images });
+                          }}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded bg-background/95 text-muted-foreground shadow-sm disabled:opacity-40"
+                        >
+                          <ArrowUp className="h-3.5 w-3.5 -rotate-90" />
+                        </button>
+                        <button
+                          type="button"
+                          title="Move right"
+                          disabled={i >= block.data.images.length - 1}
+                          onClick={() => {
+                            if (i >= block.data.images.length - 1) return;
+                            const images = [...block.data.images];
+                            const [moved] = images.splice(i, 1);
+                            images.splice(i + 1, 0, moved);
+                            onChange({ ...block.data, images });
+                          }}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded bg-background/95 text-muted-foreground shadow-sm disabled:opacity-40"
+                        >
+                          <ArrowDown className="h-3.5 w-3.5 -rotate-90" />
+                        </button>
+                        <label
+                          title="Replace image"
+                          className="inline-flex h-8 cursor-pointer items-center rounded bg-background/95 px-2 text-[10px] font-medium shadow-sm"
+                        >
+                          Replace
+                          {onUploadImage ? (
+                            <input
+                              type="file"
+                              accept="image/*"
+                              className="sr-only"
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0];
+                                e.target.value = "";
+                                if (!file || !onUploadImage) return;
+                                try {
+                                  const url = await onUploadImage(file);
+                                  onChange({
+                                    images: block.data.images.map((g, j) =>
+                                      j === i
+                                        ? {
+                                            ...g,
+                                            url,
+                                            alt:
+                                              g.alt ||
+                                              file.name
+                                                .replace(/\.[^.]+$/, "")
+                                                .replace(/[-_]/g, " "),
+                                          }
+                                        : g,
+                                    ),
+                                  });
+                                } catch {
+                                  /* ignore */
+                                }
+                              }}
+                            />
+                          ) : null}
+                        </label>
+                        <button
+                          type="button"
+                          title="Remove image"
+                          onClick={() =>
+                            onChange({
+                              ...block.data,
+                              images: block.data.images.filter((_, j) => j !== i),
+                            })
+                          }
+                          className="inline-flex h-8 w-8 items-center justify-center rounded bg-background/95 text-crimson shadow-sm"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
+                    <input
+                      disabled={readOnly}
+                      value={img.alt}
+                      placeholder="Alt text"
+                      onChange={(e) =>
+                        onChange({
+                          images: block.data.images.map((g, j) =>
+                            j === i ? { ...g, alt: e.target.value } : g,
+                          ),
+                        })
+                      }
+                      className="mt-2 w-full border-0 bg-transparent px-1 py-1 text-[11px] outline-none"
+                    />
+                    <input
+                      disabled={readOnly}
+                      value={img.caption ?? ""}
+                      placeholder="Caption"
+                      onChange={(e) =>
+                        onChange({
+                          images: block.data.images.map((g, j) =>
+                            j === i ? { ...g, caption: e.target.value } : g,
+                          ),
+                        })
+                      }
+                      className="w-full border-0 bg-transparent px-1 py-1 text-[11px] outline-none"
+                    />
+                    <div className="mt-1 flex flex-wrap items-center gap-2">
+                      <select
+                        disabled={readOnly}
+                        value={img.fit ?? "original"}
+                        onChange={(e) =>
+                          onChange({
+                            ...block.data,
+                            images: block.data.images.map((g, j) =>
+                              j === i ? { ...g, fit: e.target.value as ImageFit } : g,
+                            ),
+                          })
+                        }
+                        className="h-8 rounded-sm border border-border bg-background px-2 text-[11px]"
+                      >
+                        <option value="original">Original</option>
+                        <option value="contain">Contain</option>
+                        <option value="cover">Cover</option>
+                      </select>
+                      <label className="flex min-w-[8rem] flex-1 items-center gap-1 text-[10px] text-muted-foreground">
+                        Width
+                        <input
+                          type="range"
+                          min={50}
+                          max={100}
+                          step={5}
+                          disabled={readOnly}
+                          value={img.widthPercent ?? 100}
+                          onChange={(e) =>
+                            onChange({
+                              ...block.data,
+                              images: block.data.images.map((g, j) =>
+                                j === i ? { ...g, widthPercent: Number(e.target.value) } : g,
+                              ),
+                            })
+                          }
+                          className="min-w-0 flex-1"
+                        />
+                        <span className="w-8 tabular-nums">{img.widthPercent ?? 100}%</span>
+                      </label>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          {!readOnly && (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <MediaUrlInput
+                  readOnly={readOnly}
+                  url=""
+                  clearAfterAdd
+                  multiple
+                  onUrl={(url) => {
+                    if (url)
+                      onChange({
+                        images: [
+                          ...block.data.images,
+                          { url, alt: "", fit: "contain", widthPercent: 100 },
+                        ],
+                      });
+                  }}
+                  onUploadImage={onUploadImage}
+                  onUploadMany={async (files) => {
+                    if (!onUploadImage || !files.length) return;
+                    const added = [];
+                    for (const file of files) {
+                      const url = await onUploadImage(file);
+                      added.push({
+                        url,
+                        alt: file.name.replace(/\.[^.]+$/, "").replace(/[-_]/g, " "),
+                        fit: "contain" as ImageFit,
+                        widthPercent: 100,
+                      });
+                    }
+                    onChange({ ...block.data, images: [...block.data.images, ...added] });
+                  }}
+                  placeholder="Add image URL and press Enter"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setDamOpen(true)}
+                className="inline-flex h-10 shrink-0 items-center gap-1 rounded-md border border-border px-3 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground sm:h-8"
+              >
+                <FolderOpen className="h-3.5 w-3.5" /> Library
+              </button>
+            </div>
+          )}
+          <DamAssetPicker
+            open={damOpen}
+            onClose={() => setDamOpen(false)}
+            assetType="image"
+            title="Add gallery image"
+            onPick={(asset) => {
+              onChange({
+                images: [
+                  ...block.data.images,
+                  {
+                    url: asset.url,
+                    alt: asset.alt || "",
+                    fit: "contain",
+                    widthPercent: 100,
+                  },
+                ],
+              });
+              setDamOpen(false);
+            }}
+          />
+        </div>
+      );
+    case "table": {
+      const colCount = Math.max(block.data.headers.length, 1);
+      const rowCount = Math.max(block.data.rows.length, 1);
+      const deleteColumn = (col: number) => {
+        if (colCount <= 1) return;
+        onChange({
+          headers: block.data.headers.filter((_, i) => i !== col),
+          rows: block.data.rows.map((row) => row.filter((_, i) => i !== col)),
+        });
+      };
+      const deleteRow = (rowIndex: number) => {
+        if (block.data.rows.length <= 1) return;
+        onChange({
+          ...block.data,
+          rows: block.data.rows.filter((_, i) => i !== rowIndex),
+        });
+      };
+      const mergeLastTwoColumns = () => {
+        if (colCount < 2) return;
+        const a = colCount - 2;
+        const b = colCount - 1;
+        const left = (block.data.headers[a] ?? "").trim();
+        const right = (block.data.headers[b] ?? "").trim();
+        const mergedHeader = [left, right].filter(Boolean).join(" / ") || `Column ${a + 1}`;
+        onChange({
+          headers: [
+            ...block.data.headers.slice(0, a),
+            mergedHeader,
+            ...block.data.headers.slice(b + 1),
+          ],
+          rows: block.data.rows.map((row) => [
+            ...row.slice(0, a),
+            `${row[a] ?? ""} ${row[b] ?? ""}`.trim(),
+            ...row.slice(b + 1),
+          ]),
+        });
+      };
+      return (
+        <div className="space-y-2 overflow-x-auto">
+          <table className="w-full min-w-[480px] border-collapse text-sm">
+            <thead>
+              <tr>
+                {block.data.headers.map((header, col) => (
+                  <th key={col} className="border border-border/60 bg-muted/30 p-1 align-top">
+                    <input
+                      {...common}
+                      value={header}
+                      placeholder={`Header ${col + 1}`}
+                      onChange={(e) =>
+                        onChange({
+                          ...block.data,
+                          headers: block.data.headers.map((cell, i) =>
+                            i === col ? e.target.value : cell,
+                          ),
+                        })
+                      }
+                      className={`${canvasField} px-2 py-1 text-xs font-semibold`}
+                    />
+                    {!readOnly && colCount > 1 && (
+                      <button
+                        type="button"
+                        title="Delete column"
+                        onClick={() => deleteColumn(col)}
+                        className="mx-auto mt-0.5 flex h-5 w-5 items-center justify-center text-muted-foreground hover:text-crimson"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    )}
+                  </th>
+                ))}
+                {!readOnly && block.data.rows.length > 1 ? <th className="w-8" /> : null}
+              </tr>
+            </thead>
+            <tbody>
+              {block.data.rows.map((row, rowIndex) => (
+                <tr key={rowIndex}>
+                  {Array.from({ length: colCount }, (_, col) => (
+                    <td key={col} className="border border-border/60 p-1">
+                      <input
+                        {...common}
+                        value={row[col] ?? ""}
+                        placeholder="—"
+                        onChange={(e) =>
+                          onChange({
+                            ...block.data,
+                            rows: block.data.rows.map((cells, r) =>
+                              r === rowIndex
+                                ? Array.from({ length: colCount }, (_, c) =>
+                                    c === col ? e.target.value : (cells[c] ?? ""),
+                                  )
+                                : cells,
+                            ),
+                          })
+                        }
+                        className={`${canvasField} px-2 py-1 text-xs`}
+                      />
+                    </td>
+                  ))}
+                  {!readOnly && block.data.rows.length > 1 && (
+                    <td className="border-0 p-1 align-middle">
+                      <button
+                        type="button"
+                        title="Delete row"
+                        onClick={() => deleteRow(rowIndex)}
+                        className="inline-flex h-6 w-6 items-center justify-center text-muted-foreground hover:text-crimson"
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </button>
+                    </td>
+                  )}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          {!readOnly ? (
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                className="rounded-sm px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                onClick={() =>
+                  onChange({
+                    ...block.data,
+                    rows: [...block.data.rows, Array.from({ length: colCount }, () => "")],
+                  })
+                }
+              >
+                Add row
+              </button>
+              <button
+                type="button"
+                className="rounded-sm px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+                onClick={() =>
+                  onChange({
+                    headers: [...block.data.headers, `Column ${colCount + 1}`],
+                    rows: block.data.rows.map((row) => [...row, ""]),
+                  })
+                }
+              >
+                Add column
+              </button>
+              <button
+                type="button"
+                disabled={rowCount <= 1}
+                className="rounded-sm px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+                onClick={() =>
+                  onChange({
+                    ...block.data,
+                    rows: block.data.rows.slice(0, -1),
+                  })
+                }
+              >
+                Delete last row
+              </button>
+              <button
+                type="button"
+                disabled={colCount <= 1}
+                className="rounded-sm px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+                onClick={() => deleteColumn(colCount - 1)}
+              >
+                Delete last column
+              </button>
+              <button
+                type="button"
+                disabled={colCount < 2}
+                className="rounded-sm px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-40"
+                onClick={mergeLastTwoColumns}
+              >
+                Merge last two columns
+              </button>
+            </div>
+          ) : null}
+        </div>
+      );
+    }
+    case "code":
+      return (
+        <div className="space-y-2">
+          <select
+            disabled={readOnly}
+            value={block.data.language}
+            onChange={(e) => onChange({ ...block.data, language: e.target.value })}
+            className="h-7 rounded-sm border-0 bg-transparent px-1 text-xs text-muted-foreground opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-accent"
+          >
+            {["text", "javascript", "typescript", "json", "html", "css", "sql", "bash"].map(
+              (lang) => (
+                <option key={lang} value={lang}>
+                  {lang}
+                </option>
+              ),
+            )}
+          </select>
+          <textarea
+            {...common}
+            value={block.data.code}
+            placeholder="// Code…"
+            rows={8}
+            onChange={(e) => onChange({ ...block.data, code: e.target.value })}
+            className={`${canvasField} font-mono text-xs leading-5`}
+          />
+        </div>
+      );
+    case "html":
+      return (
+        <textarea
+          {...common}
+          value={block.data.code}
+          placeholder="<!-- Custom HTML -->"
+          rows={8}
+          onChange={(e) => onChange({ ...block.data, code: e.target.value })}
+          className={`${canvasField} font-mono text-xs leading-5 text-muted-foreground`}
+        />
+      );
+    case "live":
+      return (
+        <div className="space-y-2 border-l-2 border-cat-blue pl-4">
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1 bg-crimson/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-widest text-crimson">
+              <Radio className="h-3 w-3" /> Live
+            </span>
+            <input
+              disabled={readOnly}
+              type="datetime-local"
+              value={toLocalInput(block.data.time)}
+              onChange={(e) =>
+                onChange({
+                  ...block.data,
+                  time: e.target.value
+                    ? new Date(e.target.value).toISOString()
+                    : new Date().toISOString(),
+                })
+              }
+              className="h-7 border-0 bg-transparent px-1 text-xs text-muted-foreground"
+            />
+          </div>
+          <input
+            {...common}
+            value={block.data.title}
+            placeholder="Update headline"
+            onChange={(e) => onChange({ ...block.data, title: e.target.value })}
+            className={`${canvasField} font-semibold`}
+          />
+          <AutoTextarea
+            {...common}
+            value={block.data.text}
+            placeholder="What just happened…"
+            onChange={(text) => onChange({ ...block.data, text })}
+            className={`${canvasField} text-sm leading-6`}
+          />
+        </div>
+      );
+    case "newsletter":
+      return (
+        <div className="space-y-2 rounded-sm border border-border bg-muted/20 p-4">
+          <input
+            {...common}
+            value={block.data.heading}
+            placeholder="Heading"
+            onChange={(e) => onChange({ ...block.data, heading: e.target.value })}
+            className={`${canvasField} font-serif text-lg font-semibold`}
+          />
+          <AutoTextarea
+            {...common}
+            value={block.data.body}
+            placeholder="Supporting text"
+            onChange={(text) => onChange({ ...block.data, body: text })}
+            className={`${canvasField} text-sm leading-6`}
+          />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <input
+              {...common}
+              value={block.data.buttonLabel}
+              placeholder="Button label"
+              onChange={(e) => onChange({ ...block.data, buttonLabel: e.target.value })}
+              className={`${canvasField} text-xs`}
+            />
+            <input
+              {...common}
+              value={block.data.buttonUrl}
+              placeholder="Button URL"
+              onChange={(e) => onChange({ ...block.data, buttonUrl: e.target.value })}
+              className={`${canvasField} text-xs`}
+            />
+          </div>
+          {block.data.buttonLabel ? (
+            <span className="inline-flex items-center rounded-sm bg-crimson px-3 py-1.5 text-xs font-semibold text-white">
+              {block.data.buttonLabel}
+            </span>
+          ) : null}
+        </div>
+      );
+    case "ad":
+      return (
+        <div className="space-y-2">
+          <input
+            {...common}
+            value={block.data.label}
+            placeholder="Label (e.g. Advertisement)"
+            onChange={(e) => onChange({ ...block.data, label: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+          <div className="flex flex-wrap items-center gap-2">
+            <input
+              {...common}
+              value={block.data.imageUrl}
+              placeholder="Image URL"
+              onChange={(e) => onChange({ ...block.data, imageUrl: e.target.value })}
+              className={`${canvasField} min-w-0 flex-1 text-xs`}
+            />
+            {!readOnly && (
+              <button
+                type="button"
+                onClick={() => setDamOpen(true)}
+                className="inline-flex h-8 shrink-0 items-center gap-1 rounded-sm px-2 text-xs font-medium text-muted-foreground hover:bg-accent hover:text-foreground"
+              >
+                <FolderOpen className="h-3.5 w-3.5" /> Library
+              </button>
+            )}
+          </div>
+          <DamAssetPicker
+            open={damOpen}
+            onClose={() => setDamOpen(false)}
+            assetType="image"
+            title="Pick ad image"
+            onPick={(asset) => {
+              onChange({ ...block.data, imageUrl: asset.url });
+              setDamOpen(false);
+            }}
+          />
+          {block.data.imageUrl ? (
+            <img
+              src={block.data.imageUrl}
+              alt={block.data.label || "Advertisement"}
+              className="max-h-40 border border-border/50 object-contain"
+            />
+          ) : null}
+          <input
+            {...common}
+            value={block.data.linkUrl}
+            placeholder="Link URL"
+            onChange={(e) => onChange({ ...block.data, linkUrl: e.target.value })}
+            className={`${canvasField} text-xs`}
+          />
+          <textarea
+            {...common}
+            value={block.data.html}
+            placeholder="Custom ad HTML (optional — overrides image)"
+            rows={4}
+            onChange={(e) => onChange({ ...block.data, html: e.target.value })}
+            className={`${canvasField} font-mono text-xs leading-5 text-muted-foreground`}
+          />
+        </div>
+      );
+  }
+}
+
+function VideoPreview({ url }: { url: string }) {
+  if (!url) return null;
+  const src = embedSrc(url);
+  if (src) {
+    return (
+      <iframe
+        src={src}
+        title="Video preview"
+        className="aspect-video w-full border border-border/50"
+        allowFullScreen
+      />
+    );
+  }
+  if (isDirectVideoFile(url)) {
+    return (
+      <video src={url} controls className="aspect-video w-full border border-border/50 bg-black" />
+    );
+  }
+  return (
+    <p className="text-xs text-muted-foreground">
+      Unrecognized video URL — it will render as an external link.
+    </p>
+  );
+}
+
+function MediaUrlInput({
+  url,
+  onUrl,
+  readOnly,
+  onUploadImage,
+  onUploadMany,
+  placeholder,
+  clearAfterAdd,
+  multiple,
+}: {
+  url: string;
+  onUrl: (url: string) => void;
+  readOnly?: boolean;
+  onUploadImage?: (file: File) => Promise<string>;
+  onUploadMany?: (files: File[]) => Promise<void>;
+  placeholder: string;
+  clearAfterAdd?: boolean;
+  multiple?: boolean;
+}) {
+  const [draft, setDraft] = useState(url);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [dragOver, setDragOver] = useState(false);
+  useEffect(() => setDraft(url), [url]);
+
+  const commit = (value: string) => {
+    onUrl(value.trim());
+    if (clearAfterAdd) setDraft("");
+  };
+
+  const uploadFiles = async (files: File[]) => {
+    const images = files.filter((f) => f.type.startsWith("image/"));
+    if (!images.length) return;
+    setBusy(true);
+    setError(null);
+    try {
+      if (onUploadMany && (multiple || images.length > 1)) {
+        await onUploadMany(images);
+      } else if (onUploadImage) {
+        const uploaded = await onUploadImage(images[0]!);
+        commit(uploaded);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div
+      onDragOver={(e) => {
+        if (!onUploadImage || readOnly) return;
+        if (Array.from(e.dataTransfer.types).includes("Files")) {
+          e.preventDefault();
+          setDragOver(true);
+        }
+      }}
+      onDragLeave={() => setDragOver(false)}
+      onDrop={(e) => {
+        if (!onUploadImage || readOnly) return;
+        const files = Array.from(e.dataTransfer.files);
+        if (!files.length) return;
+        e.preventDefault();
+        setDragOver(false);
+        void uploadFiles(files);
+      }}
+      className={dragOver ? "rounded-md ring-2 ring-ring/40" : undefined}
+    >
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+        <input
+          disabled={readOnly}
+          value={draft}
+          placeholder={placeholder}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={() => {
+            if (!clearAfterAdd) commit(draft);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              commit(draft);
+            }
+          }}
+          className={`${canvasField} min-h-10 text-xs sm:min-h-8`}
+        />
+        {onUploadImage && !readOnly && (
+          <label className="inline-flex h-11 w-full shrink-0 cursor-pointer items-center justify-center gap-2 rounded-md border border-border bg-secondary px-3 text-xs font-semibold uppercase tracking-wide text-foreground hover:bg-accent sm:h-9 sm:w-auto">
+            <ImageIcon className="h-4 w-4" />
+            {busy ? "Uploading…" : multiple ? "Upload photos" : "Upload photo"}
+            <input
+              type="file"
+              accept="image/*"
+              multiple={multiple}
+              className="sr-only"
+              disabled={busy}
+              onChange={async (e) => {
+                const files = Array.from(e.target.files ?? []);
+                e.target.value = "";
+                if (!files.length) return;
+                await uploadFiles(files);
+              }}
+            />
+          </label>
+        )}
+      </div>
+      {error && <p className="mt-1 text-xs text-crimson">{error}</p>}
+    </div>
+  );
+}
+
+function AutoTextarea({
+  value,
+  onChange,
+  className,
+  placeholder,
+  disabled,
+  onKeyDown,
+  onFocus,
+  onBlur,
+  onPaste,
+  onSelect,
+  onMouseUp,
+  onKeyUp,
+  style,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  className?: string;
+  placeholder?: string;
+  disabled?: boolean;
+  onKeyDown?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  onFocus?: (e: React.FocusEvent<HTMLTextAreaElement>) => void;
+  onBlur?: (e: React.FocusEvent<HTMLTextAreaElement>) => void;
+  onPaste?: (e: React.ClipboardEvent<HTMLTextAreaElement>) => void;
+  onSelect?: (e: React.SyntheticEvent<HTMLTextAreaElement>) => void;
+  onMouseUp?: (e: React.MouseEvent<HTMLTextAreaElement>) => void;
+  onKeyUp?: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
+  style?: React.CSSProperties;
+}) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    el.style.height = `${el.scrollHeight}px`;
+  }, [value]);
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      value={value}
+      disabled={disabled}
+      placeholder={placeholder}
+      style={style}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={onKeyDown}
+      onFocus={onFocus}
+      onBlur={onBlur}
+      onPaste={onPaste}
+      onSelect={onSelect}
+      onMouseUp={onMouseUp}
+      onKeyUp={onKeyUp}
+      className={`${className} resize-none overflow-hidden`}
+    />
+  );
+}
+
+function toLocalInput(iso: string) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  const offset = date.getTimezoneOffset() * 60_000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+}
